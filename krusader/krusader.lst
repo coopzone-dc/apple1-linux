@@ -1,0 +1,2891 @@
+ca65 V2.18 - Ubuntu 2.19-2build1
+Main file   : krusader.s
+Current file: krusader.s
+
+000000r 1               ; ca65 conversion of Krusader 1.3 (Apple 1 build).
+000000r 1               ; Assemble:  ca65 -t none krusader.s -o krusader.o -l krusader.lst
+000000r 1               ;            ld65 -C krusader.cfg krusader.o -o krusader.bin
+000000r 1               	.setcpu "6502"
+000000r 1               	.feature labels_without_colons
+000000r 1               
+000000r 1               ; KRUSADER - An Assembly Language IDE for the Replica 1
+000000r 1               
+000000r 1               ; 6502 Version 1.3 - 23 December, 2007
+000000r 1               ; (c) Ken Wessen (ken.wessen@gmail.com)
+000000r 1               
+000000r 1               ; Notes:
+000000r 1               ;	- 11 bytes free (17 free if TABTOSPACE = 0)
+000000r 1               ;	- Entry points:
+000000r 1               ;		SHELL = $711C($F01C)
+000000r 1               ;		MOVEDN = $7304($F204)
+000000r 1               ;		DEBUG = -($FE14)
+000000r 1               ;		XBRK = -($FE1E) - debugger re-entry point
+000000r 1               ;		DSMBL = $7BCA($FACA)
+000000r 1               
+000000r 1               APPLE1  =1
+000000r 1               INROM	=1
+000000r 1               TABTOSPACE = 0	; the emulator already turns Tab into a space
+000000r 1               UNK_ERR_CHECK = 0
+000000r 1               
+000000r 1               MINIMONITOR = INROM & 1
+000000r 1               DOTRACE = MINIMONITOR & 1
+000000r 1               BRKAS2 = 1		; if 1, BRK will assemble to two $00 bytes
+000000r 1               			; if set, then minimonitor will work unchanged
+000000r 1               
+000000r 1               ESCAPE = $FF06
+000000r 1               	.if APPLE1
+000000r 1               KBD	=$D010		; Apple 1 keyboard data (bit 7 set)
+000000r 1               KBDRDY	=$D011		; Apple 1 keyboard control (bit 7 set when key waiting)
+000000r 1               	.else
+000000r 1               GETCH = $DFE8		; Replica 1 ROM getch routine
+000000r 1               	.endif
+000000r 1               			; for both hardware and software interrupts
+000000r 1               ; Apple 1 I/O values
+000000r 1               OUTCH	=$FFEF		; Apple 1 Echo
+000000r 1               PRHEX	=$FFE5		; Apple 1 Echo
+000000r 1               OUTHEX	=$FFDC		; Apple 1 Print Hex Byte Routine
+000000r 1               ;KBD     =$D010		; Apple 1 Keyboard character read.
+000000r 1               ;KBDRDY  =$D011		; Apple 1 Keyboard data waiting when negative.
+000000r 1               
+000000r 1               	.segment "CODE"	; linked at $7100 (see krusader.cfg); use $F000 for the INROM build
+000000r 1               
+000000r 1               	.if INROM
+000000r 1               MONTOR	=ESCAPE
+000000r 1               GETLINE	=$FF12
+000000r 1               	.ELSE
+000000r 1               MONTOR	=$FF1F
+000000r 1               GETLINE	=MONTOR		; doesn't work in RAM version because needs adjusted monitor code
+000000r 1               	.endif
+000000r 1               
+000000r 1               ; Constants
+000000r 1               
+000000r 1               ACIA = $A000
+000000r 1               ACIAControl = ACIA+0
+000000r 1               ACIAStatus = ACIA+0
+000000r 1               ACIAData = ACIA+1
+000000r 1               
+000000r 1               BS	=$08		; backspace
+000000r 1               SP	=$20		; space
+000000r 1               CR	=$0D		; carriage return
+000000r 1               LF	=$0A		; line feed
+000000r 1               ESC	=$1B		; escape
+000000r 1               INMASK  =$7F
+000000r 1               
+000000r 1               LNMSZ	=$03
+000000r 1               LBLSZ	=$06		; labels are up to 6 characters
+000000r 1               MNESZ	=$03		; mnemonics are always 3 characters
+000000r 1               ARGSZ	=$0E		; arguments are up to 14 characters
+000000r 1               COMSZ	=$0A		; comments fill the rest - up to 10 characters
+000000r 1               
+000000r 1               ENDLBL	=LNMSZ+LBLSZ+1
+000000r 1               ENDMNE	=ENDLBL+MNESZ+1
+000000r 1               ENDARG	=ENDMNE+ARGSZ+1
+000000r 1               ENDLN	=ENDARG+COMSZ+1
+000000r 1               
+000000r 1               SYMSZ	=$06		; size of labels
+000000r 1               
+000000r 1               LINESZ	=$27		; size of a line
+000000r 1               USESZ	=LINESZ-LNMSZ-1	; usable size of a line
+000000r 1               CNTSZ	=COMM-LABEL-1	; size of content in a line
+000000r 1               
+000000r 1               MAXSYM	=$20		; at most 32 local symbols (256B) and
+000000r 1               MAXFRF	=$55		; 85 forward references (896B)
+000000r 1               			; globals are limited by 1 byte index => max of 256 (2K)
+000000r 1               			; global symbol table grows downwards
+000000r 1               
+000000r 1               ; Symbols used in source code
+000000r 1               
+000000r 1               IMV	='#'		; Indicates immediate mode value
+000000r 1               HEX	='$'		; Indicates a hex value
+000000r 1               OPEN	='('		; Open bracket for indirect addressing
+000000r 1               CLOSE	=')'		; Close bracket for indirect addressing
+000000r 1               PC	='*'		; Indicates PC relative addressing
+000000r 1               LOBYTE	='<'		; Indicates lo-byte of following word
+000000r 1               HIBYTE	='>'		; Indicates hi-byte of following word
+000000r 1               PLUS	='+'		; Plus in simple expressions
+000000r 1               MINUS	='-'		; Minus in simple expressions
+000000r 1               DOT	='.'		; Indicates a local label
+000000r 1               QUOTE	=$27		; delimits a string
+000000r 1               COMMA	=','
+000000r 1               CMNT	=';'		; indicates a full line comment
+000000r 1               
+000000r 1               PROMPT	='?'
+000000r 1               
+000000r 1               EOL	=$00		; end of line marker
+000000r 1               EOFLD	=$01		; end of field in tokenised source line
+000000r 1               BLANK	=$02		; used to mark a blank line
+000000r 1               
+000000r 1               PRGEND	=$FE		; used to flag end of program parsing
+000000r 1               FAIL	=$FF		; used to flag failure in various searches
+000000r 1               
+000000r 1               ; Zero page storage
+000000r 1               IOBUF	=$00		; I/O buffer for source code input and analysis
+000000r 1               LABEL	=$04		; label starts here
+000000r 1               MNE	=$0B		; mnemonic starts here
+000000r 1               ARGS	=$0F		; arguments start here
+000000r 1               CHFLG	=$1C		;store for simulate key pressed in BASIC
+000000r 1               COMM    =$1D		; comments start here
+000000r 1               FREFTL	=$29		; address of forward reference table
+000000r 1               FREFTH	=$2A
+000000r 1               NFREF	=$2B		; number of forward symbols
+000000r 1               RECNM	=$2C		; number of table entries
+000000r 1               RECSZ	=$2D		; size of table entries
+000000r 1               RECSIG	=$2E		; significant characters in table entries
+000000r 1               XSAV	=$2F
+000000r 1               YSAV	=$30
+000000r 1               CURMNE	=$3C		; Holds the current mne index
+000000r 1               CURADM	=$3D		; Holds the current addressing mode
+000000r 1               LVALL	=$3E		; Storage for a label value
+000000r 1               LVALH	=$3F
+000000r 1               TBLL	=$40		; address of search table
+000000r 1               TBLH	=$41
+000000r 1               STRL	=$42		; address of search string
+000000r 1               STRH	=$43
+000000r 1               SCRTCH	=$44		; scratch location
+000000r 1               NPTCH	=$45		; counts frefs when patching
+000000r 1               PTCHTL	=$46		; address of forward reference being patched
+000000r 1               PTCHTH	=$47
+000000r 1               FLGSAV	=$48
+000000r 1               
+000000r 1               MISCL	=$50		; Miscellaneous address pointer
+000000r 1               MISCH	=$51
+000000r 1               MISC2L	=$52		; And another
+000000r 1               MISC2H	=$53
+000000r 1               TEMP1	=$54		; general purpose storage
+000000r 1               TEMP2	=$55
+000000r 1               TEMP3	=$56
+000000r 1               TEMP4	=$57
+000000r 1               LMNE	=TEMP3		; alias for compression and expansion routines
+000000r 1               RMNE	=TEMP4
+000000r 1               FRFLAG	=$58		; if nonzero, disallow forward references
+000000r 1               ERFLAG	=$59		; if nonzero, do not report error line
+000000r 1               HADFRF	=$5A		; if nonzero, handled a forward reference
+000000r 1               PRFLAG	=$5B
+000000r 1               
+000000r 1               ; want these to persist if possible when going into the monitor
+000000r 1               ; to test code etc, so put them right up high
+000000r 1               XQT	=$E0
+000000r 1               
+000000r 1               ; these 6 locations must be contiguous
+000000r 1               GSYMTL	=$E9		; address of the global symbol table
+000000r 1               GSYMTH	=$EA
+000000r 1               NGSYM	=$EB		; number of global symbols
+000000r 1               LSYMTL	=$EC		; address of the local symbol table
+000000r 1               LSYMTH	=$ED
+000000r 1               NLSYM	=$EE		; number of local symbols
+000000r 1               
+000000r 1               ; these 7 locations must be contiguous
+000000r 1               REGS	=$F0
+000000r 1               SAVP	=REGS
+000000r 1               SAVS	=$F1
+000000r 1               SAVY	=$F2
+000000r 1               SAVX	=$F3
+000000r 1               SAVA	=$F4
+000000r 1               CURPCL	=$F5		; Current PC
+000000r 1               CURPCH	=$F6
+000000r 1               
+000000r 1               CODEH	=$F8		; hi byte of code storage area (low is $00)
+000000r 1               TABLEH	=$F9		; hi byte of symbol table area
+000000r 1               
+000000r 1               ; these 4 locations must be contiguous
+000000r 1               LINEL	=$FA		; Current source line number (starts at 0)
+000000r 1               LINEH	=$FB
+000000r 1               CURLNL	=$FC		; Current source line address
+000000r 1               CURLNH	=$FD
+000000r 1               
+000000r 1               SRCSTL	=$FE		; source code start address
+000000r 1               SRCSTH	=$FF
+000000r 1               
+000000r 1               ; for disassembler
+000000r 1               FORMAT	=FREFTL		; re-use spare locations
+000000r 1               LENGTH	=FREFTH
+000000r 1               COUNT	=NFREF
+000000r 1               PCL	=CURPCL
+000000r 1               PCH	=CURPCH
+000000r 1               
+000000r 1               ; ****************************************
+000000r 1               ; 	COMMAND SHELL/EDITOR CODE
+000000r 1               ; ****************************************
+000000r 1               
+000000r 1               MAIN
+000000r 1               	.if INROM
+000000r 1  A9 03        	LDA #$03
+000002r 1  85 F8        	STA CODEH
+000004r 1  A9 20        	LDA #$20
+000006r 1  85 FF        	STA SRCSTH
+000008r 1  A9 7C        	LDA #$7C
+00000Ar 1  85 F9        	STA TABLEH
+00000Cr 1               	.else
+00000Cr 1               	LDA #$03
+00000Cr 1               	STA CODEH
+00000Cr 1               	LDA #$1D
+00000Cr 1               	STA SRCSTH
+00000Cr 1               	LDA #$6D
+00000Cr 1               	STA TABLEH
+00000Cr 1               	.endif
+00000Cr 1  A2 1B        	LDX #MSGSZ
+00000Er 1  BD rr rr     @NEXT	LDA MSG-1,X
+000011r 1  20 EF FF     	JSR OUTCH
+000014r 1  CA           	DEX
+000015r 1  D0 F7        	BNE @NEXT
+000017r 1  CA           	DEX
+000018r 1  9A           	TXS		; reset stack pointer on startup
+000019r 1  20 rr rr     	JSR SHINIT	; default source line and address data
+00001Cr 1               ;	JMP SHELL
+00001Cr 1               ; falls through to SHELL
+00001Cr 1               
+00001Cr 1               ; ****************************************
+00001Cr 1               
+00001Cr 1               SHELL			; Loops forever
+00001Cr 1               			; also the re-entry point
+00001Cr 1  D8           	CLD		; just incase
+00001Dr 1  A9 00        	LDA #$00
+00001Fr 1  85 5B        	STA PRFLAG
+000021r 1  20 rr rr     	JSR FILBUF
+000024r 1  A2 0F        	LDX #ARGS
+000026r 1  86 58        	STX FRFLAG	; set flags in SHELL
+000028r 1  86 59        	STX ERFLAG
+00002Ar 1  20 rr rr     	JSR CRLF
+00002Dr 1  A9 3F        	LDA #PROMPT
+00002Fr 1  20 EF FF     	JSR OUTCH	; prompt
+000032r 1  20 rr rr     	JSR OUTSP	; can drop this if desperate for 3 more bytes :-)
+000035r 1  20 rr rr     @KEY	JSR GETCH
+000038r 1  C9 08        	CMP #BS
+00003Ar 1  F0 E0        	BEQ SHELL	; start again
+00003Cr 1  C9 0D        	CMP #CR
+00003Er 1  F0 08        	BEQ @RUN
+000040r 1  20 EF FF     	JSR OUTCH
+000043r 1  95 00        	STA IOBUF,X
+000045r 1  E8           	INX
+000046r 1  D0 ED        	BNE @KEY	; always branches
+000048r 1  A5 0F        @RUN	LDA ARGS
+00004Ar 1  F0 D0        	BEQ SHELL	; empty command line
+00004Cr 1  A5 10        	LDA ARGS+1	; ensure command is just a single letter
+00004Er 1  F0 04        	BEQ @OK
+000050r 1  C9 20        	CMP #SP
+000052r 1  D0 0C        	BNE @ERR;SHLERR
+000054r 1  A2 0D        @OK	LDX #NUMCMD
+000056r 1  BD rr rr     @NEXT	LDA CMDS-1,X	; find the typed command
+000059r 1  C5 0F        	CMP ARGS
+00005Br 1  F0 0E        	BEQ GOTCMD
+00005Dr 1  CA           	DEX
+00005Er 1  D0 F6        	BNE @NEXT
+000060r 1  48           @ERR	PHA		; put dummy data on the stack
+000061r 1  48           	PHA
+000062r 1               SHLERR
+000062r 1  A0 03        	LDY #SYNTAX
+000064r 1  68           ERR2	PLA		; need to clean up the stack
+000065r 1  68           	PLA
+000066r 1  20 rr rr     	JSR SHWERR
+000069r 1  D0 B1        	BNE SHELL
+00006Br 1  20 rr rr     GOTCMD	JSR RUNCMD
+00006Er 1  4C rr rr     	JMP SHELL	; ready for next command
+000071r 1               
+000071r 1               ; ****************************************
+000071r 1               
+000071r 1               SHINIT
+000071r 1  A9 00        	LDA #$00
+000073r 1  A8           	TAY
+000074r 1  85 FE        	STA SRCSTL	; low byte zero for storage area
+000076r 1  91 FE        	STA (SRCSTL),Y	; and put a zero in it for EOP
+000078r 1               TOSTRT			; set LINEL,H and CURLNL,H to the start
+000078r 1  A5 FF        	LDA SRCSTH
+00007Ar 1  85 FD        	STA CURLNH
+00007Cr 1  A9 00        	LDA #$00
+00007Er 1  85 FA        	STA LINEL
+000080r 1  85 FB        	STA LINEH	; 0 lines
+000082r 1  85 FC        	STA CURLNL
+000084r 1  60           	RTS		; leaves $00 in A
+000085r 1               
+000085r 1               ; ****************************************
+000085r 1               
+000085r 1               PANIC
+000085r 1  20 rr rr     	JSR SHINIT
+000088r 1  A5 11        	LDA ARGS+2
+00008Ar 1  D0 02        	BNE @SKIP
+00008Cr 1  A9 01        	LDA #$01
+00008Er 1  91 FE        @SKIP	STA (SRCSTL),Y	; Y is $00 from SHINIT
+000090r 1  60           	RTS
+000091r 1               
+000091r 1               ; ****************************************
+000091r 1               
+000091r 1               VALUE
+000091r 1  20 rr rr     	JSR ADDARG
+000094r 1  F0 CC        	BEQ SHLERR
+000096r 1  20 rr rr     	JSR CRLF
+000099r 1  A5 3F        	LDA LVALH
+00009Br 1  A6 3E        	LDX LVALL
+00009Dr 1  4C rr rr     	JMP PRNTAX
+0000A0r 1               
+0000A0r 1               ; ****************************************
+0000A0r 1               
+0000A0r 1               RUN
+0000A0r 1  20 rr rr     	JSR ADDARG
+0000A3r 1  F0 BD        	BEQ SHLERR
+0000A5r 1  20 rr rr     	JSR CRLF
+0000A8r 1  6C 3E 00     	JMP (LVALL)	; jump to the address
+0000ABr 1               
+0000ABr 1               ; ****************************************
+0000ABr 1               
+0000ABr 1               ADDARG			; convert argument to address
+0000ABr 1  A2 02        	LDX #$02
+0000ADr 1  B5 0F        	LDA ARGS,X
+0000AFr 1  F0 08        	BEQ @NOARG
+0000B1r 1  48           	PHA
+0000B2r 1  20 rr rr     	JSR EVAL
+0000B5r 1  68           	PLA
+0000B6r 1               	;CPX #FAIL
+0000B6r 1  E8           	INX
+0000B7r 1  F0 AB        	BEQ ERR2;SHLERR
+0000B9r 1  60           @NOARG	RTS
+0000BAr 1               
+0000BAr 1               ; ****************************************
+0000BAr 1               
+0000BAr 1               PCTOLV
+0000BAr 1  A5 F5        	LDA CURPCL
+0000BCr 1  85 3E        	STA LVALL
+0000BEr 1  A5 F6        	LDA CURPCH
+0000C0r 1  85 3F        	STA LVALH
+0000C2r 1  60           	RTS
+0000C3r 1               
+0000C3r 1               ; ****************************************
+0000C3r 1               
+0000C3r 1               LVTOPC
+0000C3r 1  A5 3E        	LDA LVALL
+0000C5r 1  85 F5        	STA CURPCL
+0000C7r 1  A5 3F        	LDA LVALH
+0000C9r 1  85 F6        	STA CURPCH
+0000CBr 1  60           	RTS
+0000CCr 1               
+0000CCr 1               ; ****************************************
+0000CCr 1               
+0000CCr 1               FILLSP
+0000CCr 1  A9 20        	LDA #SP
+0000CEr 1               FILBUF			; fill the buffer with the contents of A
+0000CEr 1  A2 27        	LDX #LINESZ
+0000D0r 1  95 FF        @CLR	STA <(IOBUF-1),X
+0000D2r 1  CA           	DEX
+0000D3r 1  D0 FB        	BNE @CLR
+0000D5r 1  60           	RTS
+0000D6r 1               
+0000D6r 1               ; ****************************************
+0000D6r 1               
+0000D6r 1               RUNCMD
+0000D6r 1  BD rr rr     	LDA CMDH-1,X
+0000D9r 1  48             	PHA
+0000DAr 1  BD rr rr       	LDA CMDL-1,X
+0000DDr 1  48             	PHA
+0000DEr 1  60             	RTS
+0000DFr 1               
+0000DFr 1               ; ****************************************
+0000DFr 1               
+0000DFr 1               NEW
+0000DFr 1  20 rr rr     	JSR SHINIT
+0000E2r 1  4C rr rr     	JMP INSERT
+0000E5r 1               
+0000E5r 1               ; ****************************************
+0000E5r 1               
+0000E5r 1               LIST			; L 	- list all
+0000E5r 1               			; L nnn - list from line nnn
+0000E5r 1  20 rr rr     	JSR TOSTRT
+0000E8r 1  20 rr rr     	JSR GETARG
+0000EBr 1  F0 03        	BEQ @NEXT	; no args, list from start
+0000EDr 1  20 rr rr     	JSR GOTOLN	; deal with arguments if necessary
+0000F0r 1  A0 00        @NEXT	LDY #$00
+0000F2r 1  B1 FC        	LDA (CURLNL),Y
+0000F4r 1  F0 0E        	BEQ @RET
+0000F6r 1  20 rr rr     	JSR PRNTLN
+0000F9r 1  20 rr rr     	JSR UPDTCL
+0000FCr 1               
+0000FCr 1               	.if APPLE1
+0000FCr 1  AD 11 D0     	LDA	KBDRDY	; any key stops the listing
+0000FFr 1  10 EF        	BPL	@NEXT
+000101r 1  AD 10 D0     	LDA	KBD
+000104r 1               	.else
+000104r 1                       LDA     ACIAStatus
+000104r 1                       AND     #1
+000104r 1                       BEQ     @NEXT
+000104r 1                       LDA     ACIAData
+000104r 1               	.endif
+000104r 1  60           @RET	RTS
+000105r 1               
+000105r 1               ; ****************************************
+000105r 1               
+000105r 1               MEM
+000105r 1  20 rr rr     	JSR TOEND	; set CURLNL,H to the end
+000108r 1  20 rr rr     	JSR CRLF
+00010Br 1  A2 04        	LDX #$04
+00010Dr 1  B5 FB        @LOOP	LDA CURLNL-1,X
+00010Fr 1  20 DC FF     	JSR OUTHEX
+000112r 1  E0 03        	CPX #$03
+000114r 1  D0 03        	BNE @SKIP
+000116r 1  20 rr rr     	JSR PRDASH
+000119r 1  CA           @SKIP	DEX
+00011Ar 1  D0 F1        	BNE @LOOP
+00011Cr 1  60           RET	RTS
+00011Dr 1               
+00011Dr 1               ; ****************************************
+00011Dr 1               
+00011Dr 1               GETARG			; get the one or two numeric arguments
+00011Dr 1               			; to the list, edit, delete and insert commands
+00011Dr 1               			; store them in TEMP1-4 as found
+00011Dr 1               			; arg count in Y or X has FAIL
+00011Dr 1  A0 00        	LDY #$00
+00011Fr 1  84 30        	STY YSAV
+000121r 1  A2 01        	LDX #$01
+000123r 1  B5 0F        @NEXT	LDA ARGS,X
+000125r 1  F0 25        	BEQ @DONE	; null terminator
+000127r 1  C9 20        	CMP #SP		; find the space
+000129r 1  F0 07        	BEQ @CVT
+00012Br 1  C9 24        	CMP #HEX	; or $ symbol
+00012Dr 1  F0 03        	BEQ @CVT
+00012Fr 1  E8           	INX
+000130r 1  D0 F1        	BNE @NEXT
+000132r 1  E6 30        @CVT	INC YSAV	; count args
+000134r 1  A9 24        	LDA #HEX
+000136r 1  95 0F        	STA ARGS,X	; replace the space with '$' and convert
+000138r 1  20 rr rr     	JSR CONVRT
+00013Br 1               	;CPX #FAIL
+00013Br 1  E8           	INX
+00013Cr 1  F0 5F        	BEQ LCLERR
+00013Er 1               	;INX
+00013Er 1  A5 3E        	LDA LVALL
+000140r 1  99 54 00     	STA TEMP1,Y
+000143r 1  C8           	INY
+000144r 1  A5 3F        	LDA LVALH
+000146r 1  99 54 00     	STA TEMP1,Y
+000149r 1  C8           	INY
+00014Ar 1  D0 D7        	BNE @NEXT	; always branches
+00014Cr 1  A4 30        @DONE	LDY YSAV
+00014Er 1  60           	RTS		; m in TEMP1,2, n in TEMP3,4
+00014Fr 1               
+00014Fr 1               ; ****************************************
+00014Fr 1               
+00014Fr 1               EDIT
+00014Fr 1  20 rr rr     	JSR GETARG
+000152r 1               	;CPY #$01
+000152r 1  88           	DEY
+000153r 1  D0 48        	BNE LCLERR
+000155r 1  20 rr rr     	JSR DELETE	; must not overwrite the command input buffer
+000158r 1               ;	JMP INSERT
+000158r 1               ; falls through to INSERT
+000158r 1               
+000158r 1               ; ****************************************
+000158r 1               
+000158r 1               INSERT
+000158r 1  20 rr rr     	JSR GETARG	; deal with arguments if necessary
+00015Br 1               	;CPX #FAIL
+00015Br 1  E8           	INX
+00015Cr 1  F0 3F        	BEQ LCLERR
+00015Er 1               	;CPY #$00	; no args
+00015Er 1  98           	TYA
+00015Fr 1  D0 06        	BNE @ARGS
+000161r 1  20 rr rr     	JSR TOEND	; insert at the end
+000164r 1  18           	CLC
+000165r 1  90 03        	BCC @IN
+000167r 1  20 rr rr     @ARGS	JSR GOTOLN	; if no such line will insert at end
+00016Ar 1  20 rr rr     @IN	JSR INPUT	; Get one line
+00016Dr 1  E0 FF        	CPX #FAIL	; Was there an error?
+00016Fr 1  F0 AB        	BEQ RET;
+000171r 1               	; Save the tokenised line and update pointers
+000171r 1               	; tokenised line is in IOBUF, size X
+000171r 1               	; move up from CURLNL,H to make space
+000171r 1  86 2F        	STX XSAV	; save X (data size)
+000173r 1  A5 FD        	LDA CURLNH
+000175r 1  85 51        	STA MISCH
+000177r 1  85 53        	STA MISC2H
+000179r 1  A5 FC        	LDA CURLNL
+00017Br 1  85 50        	STA MISCL	; src in MISCL,H now
+00017Dr 1  18           	CLC
+00017Er 1  65 2F        	ADC XSAV
+000180r 1  85 52        	STA MISC2L
+000182r 1  90 02        	BCC @READY
+000184r 1  E6 53        	INC MISC2H	; MISC2L,H is destination
+000186r 1  20 rr rr     @READY	JSR GETSZ
+000189r 1  20 rr rr     	JSR MOVEUP	; do the move
+00018Cr 1  A0 00        	LDY #$00
+00018Er 1               	; now move the line to the source storage area
+00018Er 1               	; Y bytes, from IOBUF to CURLN
+00018Er 1  B9 00 00     @MOVE	LDA IOBUF,Y
+000191r 1  91 FC        	STA (CURLNL),Y
+000193r 1  C8           	INY
+000194r 1  C4 2F        	CPY XSAV
+000196r 1  D0 F6        	BNE @MOVE
+000198r 1  20 rr rr     	JSR UPDTCL	; update CURLNL,H
+00019Br 1  D0 CD        	BNE @IN		; always branches
+00019Dr 1               
+00019Dr 1               ; ****************************************
+00019Dr 1               
+00019Dr 1               LCLERR			; local error wrapper
+00019Dr 1               			; shared by the routines around it
+00019Dr 1  4C rr rr     	JMP SHLERR
+0001A0r 1               
+0001A0r 1               ; ****************************************
+0001A0r 1               
+0001A0r 1               GETSZ			; SIZE = TEMP1,2 = lastlnL,H - MISCL,H + 1
+0001A0r 1  A2 FC        	LDX #<(-$04)
+0001A2r 1  B5 FE        @LOOP	LDA CURLNH+1,X
+0001A4r 1  48           	PHA		; save CURLN and LINEN on the stack
+0001A5r 1  E8           	INX
+0001A6r 1  D0 FA        	BNE @LOOP
+0001A8r 1  20 rr rr     	JSR TOEND
+0001ABr 1  38           	SEC
+0001ACr 1  A5 FC        	LDA CURLNL
+0001AEr 1  E5 50        	SBC MISCL
+0001B0r 1  85 54        	STA TEMP1
+0001B2r 1  A5 FD        	LDA CURLNH
+0001B4r 1  E5 51        	SBC MISCH
+0001B6r 1  85 55        	STA TEMP2
+0001B8r 1  E6 54        	INC TEMP1
+0001BAr 1  D0 02        	BNE @SKIP
+0001BCr 1  E6 55        	INC TEMP2
+0001BEr 1  A2 04        @SKIP	LDX #$04
+0001C0r 1  68           @LOOP2	PLA		; get CURLN and LINEN from the stack
+0001C1r 1  95 F9        	STA LINEL-1,X
+0001C3r 1  CA           	DEX
+0001C4r 1  D0 FA        	BNE @LOOP2
+0001C6r 1  60           	RTS
+0001C7r 1               
+0001C7r 1               ; ****************************************
+0001C7r 1               
+0001C7r 1               DELETE			; Delete the specified range
+0001C7r 1               			; Moves from address of line arg2 (MISCL,H)
+0001C7r 1               			; to address of line arg1 (MISC2L,H)
+0001C7r 1  20 rr rr     	JSR GETARG
+0001CAr 1               ;	CPY #$00
+0001CAr 1  F0 D1        	BEQ LCLERR
+0001CCr 1  84 30        	STY YSAV
+0001CEr 1  20 rr rr     @DOIT	JSR GOTOLN	; this leaves TEMP1 in Y and TEMP2 in X
+0001D1r 1  E0 FF        	CPX #FAIL
+0001D3r 1  F0 C8        	BEQ LCLERR
+0001D5r 1  A5 FC        	LDA CURLNL
+0001D7r 1  85 52        	STA MISC2L
+0001D9r 1  A5 FD        	LDA CURLNH
+0001DBr 1  85 53        	STA MISC2H	; destination address is set in MISC2L,H
+0001DDr 1  A5 30        	LDA YSAV
+0001DFr 1               	;CMP #$01
+0001DFr 1  4A           	LSR
+0001E0r 1  F0 0C        	BEQ @INC
+0001E2r 1  A6 57        	LDX TEMP4
+0001E4r 1  A4 56        	LDY TEMP3	; Validate the range arguments
+0001E6r 1  E4 55        	CPX TEMP2	; First compare high bytes
+0001E8r 1  D0 02        	BNE @CHK	; If TEMP4 != TEMP2, we just need to check carry
+0001EAr 1  C4 54        	CPY TEMP1	; Compare low bytes when needed
+0001ECr 1  90 AF        @CHK	BCC LCLERR	; If carry clear, 2nd argument is too low
+0001EEr 1  C8           @INC	INY		; Now increment the second argument
+0001EFr 1  D0 01        	BNE @CONT
+0001F1r 1  E8           	INX
+0001F2r 1  86 55        @CONT	STX TEMP2
+0001F4r 1  84 54        	STY TEMP1
+0001F6r 1  20 rr rr     	JSR GOTOLN
+0001F9r 1  A5 FC        	LDA CURLNL
+0001FBr 1  85 50        	STA MISCL
+0001FDr 1  A5 FD        	LDA CURLNH
+0001FFr 1  85 51        	STA MISCH
+000201r 1  20 rr rr     	JSR GETSZ
+000204r 1               ;	JMP MOVEDN
+000204r 1               ; falls through
+000204r 1               
+000204r 1               ; ****************************************
+000204r 1               ;	Memory moving routines
+000204r 1               ;  From http://www.6502.org/source/general/memory_move.html
+000204r 1               ; ****************************************
+000204r 1               
+000204r 1               ; Some aliases for the following two memory move routines
+000204r 1               
+000204r 1               FROM	=MISCL		; move from MISCL,H
+000204r 1               TO	=MISC2L		; to MISCL2,H
+000204r 1               SIZEL	=TEMP1
+000204r 1               SIZEH	=TEMP2
+000204r 1               
+000204r 1               MOVEDN			; Move memory down
+000204r 1  A0 00        	LDY #$00
+000206r 1  A6 55        	LDX SIZEH
+000208r 1  F0 0E        	BEQ @MD2
+00020Ar 1  B1 50        @MD1	LDA (FROM),Y ; move a page at a time
+00020Cr 1  91 52        	STA (TO),Y
+00020Er 1  C8           	INY
+00020Fr 1  D0 F9        	BNE @MD1
+000211r 1  E6 51        	INC FROM+1
+000213r 1  E6 53        	INC TO+1
+000215r 1  CA           	DEX
+000216r 1  D0 F2        	BNE @MD1
+000218r 1  A6 54        @MD2	LDX SIZEL
+00021Ar 1  F0 08        	BEQ @MD4
+00021Cr 1  B1 50        @MD3	LDA (FROM),Y ; move the remaining bytes
+00021Er 1  91 52        	STA (TO),Y
+000220r 1  C8           	INY
+000221r 1  CA           	DEX
+000222r 1  D0 F8        	BNE @MD3
+000224r 1  60           @MD4	RTS
+000225r 1               
+000225r 1               MOVEUP			; Move memory up
+000225r 1  A6 55        	LDX SIZEH	; the last byte must be moved first
+000227r 1  18           	CLC		; start at the final pages of FROM and TO
+000228r 1  8A           	TXA
+000229r 1  65 51        	ADC FROM+1
+00022Br 1  85 51        	STA FROM+1
+00022Dr 1  18           	CLC
+00022Er 1  8A           	TXA
+00022Fr 1  65 53        	ADC TO+1
+000231r 1  85 53        	STA TO+1
+000233r 1  E8           	INX		; allows the use of BNE after the DEX below
+000234r 1  A4 54        	LDY SIZEL
+000236r 1  F0 0E        	BEQ @MU3
+000238r 1  88           	DEY		; move bytes on the last page first
+000239r 1  F0 07        	BEQ @MU2
+00023Br 1  B1 50        @MU1	LDA (FROM),Y
+00023Dr 1  91 52        	STA (TO),Y
+00023Fr 1  88           	DEY
+000240r 1  D0 F9        	BNE @MU1
+000242r 1  B1 50        @MU2	LDA (FROM),Y	; handle Y = 0 separately
+000244r 1  91 52        	STA (TO),Y
+000246r 1  88           @MU3	DEY
+000247r 1  C6 51        	DEC FROM+1	; move the next page (if any)
+000249r 1  C6 53        	DEC TO+1
+00024Br 1  CA           	DEX
+00024Cr 1  D0 ED        	BNE @MU1
+00024Er 1  60           	RTS
+00024Fr 1               
+00024Fr 1               ; ****************************************
+00024Fr 1               
+00024Fr 1               TOEND
+00024Fr 1  A9 FF        	LDA #$FF
+000251r 1  85 55        	STA TEMP2	; makes illegal line number
+000253r 1               ;	JMP GOTOLN	; so CURLNL,H will be set to the end
+000253r 1               ; falls through
+000253r 1               
+000253r 1               ; ****************************************
+000253r 1               
+000253r 1               GOTOLN			; go to line number given in TEMP1,2
+000253r 1               			; sets CURLNL,H to the appropriate address
+000253r 1               			; and leaves TEMP1 in Y and TEMP2 in X
+000253r 1               			; if not present, return #FAIL in X
+000253r 1               			; and LINEL,H will be set to the next available line number
+000253r 1               EOP	= LFAIL
+000253r 1               GOTIT	= LRET
+000253r 1  20 rr rr     	JSR TOSTRT
+000256r 1               @NXTLN			; is the current line number the same
+000256r 1               			; as specified in TEMP1,2?
+000256r 1               			; Z set if equal
+000256r 1               			; C set if TEMP1,2 >= LINEL,H
+000256r 1  A4 54        	LDY TEMP1
+000258r 1  C4 FA        	CPY LINEL
+00025Ar 1  D0 06        	BNE @NO
+00025Cr 1  A6 55        	LDX TEMP2
+00025Er 1  E4 FB        	CPX LINEH
+000260r 1  F0 4B        	BEQ GOTIT
+000262r 1  A0 FF        @NO	LDY #$FF
+000264r 1  C8           @NXTBT	INY		; find EOL
+000265r 1  B1 FC        	LDA (CURLNL),Y
+000267r 1  D0 FB        	BNE @NXTBT
+000269r 1  98           	TYA
+00026Ar 1               	;CPY #$00
+00026Ar 1  F0 3F        	BEQ EOP		; null at start of line => end of program
+00026Cr 1  C8           	INY
+00026Dr 1  20 rr rr     	JSR UPDTCL	; increment CURLNL,H by Y bytes
+000270r 1  D0 E4        	BNE @NXTLN	; always branches
+000272r 1               ;.EOP	LDX #FAIL
+000272r 1               ;.GOTIT	RTS		; address is now in CURLNL,H
+000272r 1               
+000272r 1               ; ****************************************
+000272r 1               
+000272r 1               PRNTLN			; print out the current line (preserve X)
+000272r 1  20 rr rr     	JSR CRLF
+000275r 1  86 2F        	STX XSAV
+000277r 1  20 rr rr     	JSR DETKN
+00027Ar 1  C8           	INY
+00027Br 1  20 rr rr     	JSR PRLNNM
+00027Er 1  A2 00        	LDX #$00
+000280r 1  B5 04        @PRINT	LDA LABEL,X
+000282r 1  F0 06        	BEQ @DONE	; null terminator
+000284r 1  20 EF FF     	JSR OUTCH
+000287r 1  E8           	INX
+000288r 1               	;CPX #USESZ
+000288r 1  D0 F6        	BNE @PRINT
+00028Ar 1  A6 2F        @DONE	LDX XSAV
+00028Cr 1  60           	RTS
+00028Dr 1               
+00028Dr 1               ; ****************************************
+00028Dr 1               
+00028Dr 1               NEXTCH			; Check for valid character in A
+00028Dr 1               			; Also allows direct entry to appropriate location
+00028Dr 1               			; Flag success with C flag
+00028Dr 1  20 rr rr     	JSR GETCH
+000290r 1               	.if TABTOSPACE
+000290r 1               	CMP #$09	; is it a tab?
+000290r 1               	BNE @SKIP
+000290r 1               	LDA #SP
+000290r 1               	.endif
+000290r 1  C9 20        @SKIP	CMP #SP		; valid ASCII range is $20 to $5D
+000292r 1  10 1A        	BPL CHANM	; check alpha numeric entries
+000294r 1  A8           	TAY
+000295r 1  68           	PLA
+000296r 1  68           	PLA
+000297r 1  68           	PLA
+000298r 1  68           	PLA		; wipe out return addresses
+000299r 1  C0 08        	CPY #BS
+00029Br 1  F0 3B        	BEQ INPUT	; just do it all again
+00029Dr 1  C0 0D        @NOBS	CPY #CR
+00029Fr 1  D0 0A        	BNE LFAIL
+0002A1r 1  E0 04        	CPX #LABEL	; CR at start of LABEL means a blank line
+0002A3r 1  F0 29        	BEQ DOBLNK
+0002A5r 1  A9 00        	LDA #EOL
+0002A7r 1  95 00        	STA IOBUF,X
+0002A9r 1  F0 5C        	BEQ GOTEOL
+0002ABr 1  A2 FF        LFAIL	LDX #FAIL	; may flag error or just end
+0002ADr 1  60           LRET	RTS
+0002AEr 1  E0 27        CHANM	CPX #LINESZ	; ignore any characters over the end of the line
+0002B0r 1  10 1A        	BPL CHNO
+0002B2r 1  C9 5E        	CMP #']'+1	; is character is in range $20-$5D?
+0002B4r 1  10 16        	BPL CHNO	; branch to NO...
+0002B6r 1  38           CHOK	SEC		; C flag on indicates success
+0002B7r 1  60           	RTS
+0002B8r 1  C9 2E        CHKLBL	CMP #DOT	; here are more specific checks
+0002BAr 1  F0 FA        	BEQ CHOK
+0002BCr 1  C9 30        CHKALN	CMP #'0'	; check alpha-numeric
+0002BEr 1  30 0C        	BMI CHNO	; less than 0
+0002C0r 1  C9 3A        	CMP #'9'+1
+0002C2r 1  30 F2        	BMI CHOK	; between 0 and 9
+0002C4r 1  C9 41        CHKLET	CMP #'A'
+0002C6r 1  30 04        	BMI CHNO	; less than A
+0002C8r 1  C9 5B        	CMP #'Z'+1
+0002CAr 1  30 EA        	BMI CHOK	; between A and Z
+0002CCr 1  18           CHNO	CLC
+0002CDr 1  60           	RTS		; C flag off indicates failure
+0002CEr 1               
+0002CEr 1               ; ****************************************
+0002CEr 1               
+0002CEr 1               DOBLNK
+0002CEr 1  A9 02        	LDA #BLANK
+0002D0r 1  AA           	TAX		; BLANK = #$02, and that is also the
+0002D1r 1  85 00        	STA IOBUF	; tokenised size of a blank line
+0002D3r 1  A9 00        	LDA #EOL	; (and only a blank line)
+0002D5r 1  85 01        	STA IOBUF+1
+0002D7r 1  60           ENDIN	RTS
+0002D8r 1               
+0002D8r 1               INPUT
+0002D8r 1  20 rr rr     	JSR FILLSP
+0002DBr 1  A9 00        	LDA #EOL	; need this marker at the start of the comments
+0002DDr 1  85 1D        	STA COMM	; for when return hit in args field
+0002DFr 1  20 rr rr     	JSR CRLF
+0002E2r 1  20 rr rr     	JSR PRLNNM
+0002E5r 1  A2 04        	LDX #LABEL	; point to LABEL area
+0002E7r 1  A9 0A        	LDA #ENDLBL
+0002E9r 1  20 rr rr     	JSR ONEFLD
+0002ECr 1  20 rr rr     	JSR INSSPC	; Move to mnemonic field
+0002EFr 1  A5 04        	LDA LABEL
+0002F1r 1  C9 3B        	CMP #CMNT
+0002F3r 1  F0 0D        	BEQ @CMNT
+0002F5r 1  A9 0E        	LDA #ENDMNE
+0002F7r 1  20 rr rr     	JSR ONEFLD
+0002FAr 1  20 rr rr     	JSR INSSPC	; Move to args field
+0002FDr 1  A9 1D        	LDA #ENDARG
+0002FFr 1  20 rr rr     	JSR ONEFLD
+000302r 1  A9 00        @CMNT	LDA #EOL
+000304r 1  20 rr rr     	JSR ONEFLD
+000307r 1               GOTEOL	;JMP TOTKN
+000307r 1               ; falls through
+000307r 1               
+000307r 1               ; ****************************************
+000307r 1               
+000307r 1               TOTKN			; tokenise to IOBUF to calc size
+000307r 1               			; then move memory to make space
+000307r 1               			; then copy from IOBUF into the space
+000307r 1  A2 00        	LDX #$00
+000309r 1  86 51        	STX MISCH
+00030Br 1  A9 20        	LDA #SP
+00030Dr 1  85 55        	STA TEMP2
+00030Fr 1  A9 04        	LDA #LABEL
+000311r 1  85 50        	STA MISCL
+000313r 1  A9 01        	LDA #EOFLD
+000315r 1  85 54        	STA TEMP1
+000317r 1  20 rr rr     	JSR TKNISE
+00031Ar 1  A4 04        	LDY LABEL
+00031Cr 1  C0 3B        	CPY #CMNT
+00031Er 1  D0 04        	BNE @CONT
+000320r 1  A9 0B        	LDA #MNE
+000322r 1  D0 5F        	BNE ISCMNT	; always branches
+000324r 1  8A           @CONT	TXA		; save X
+000325r 1  48           	PHA
+000326r 1               
+000326r 1               ;	JSR SRCHMN	; is it a mnemonic?
+000326r 1               
+000326r 1               SRCHMN  		; Search the table of mnemonics	for the mnemonic in MNE
+000326r 1               			; Return the index in A
+000326r 1               
+000326r 1               CMPMNE			; compress the 3 char mnemonic
+000326r 1               			; at MNE to MNE+2 into 2 chars
+000326r 1               			; at LMNE and RMNE
+000326r 1  18           	CLC
+000327r 1  66 56        	ROR LMNE
+000329r 1  A2 03        	LDX #$03
+00032Br 1  38           @NEXT2	SEC
+00032Cr 1  B5 0A        	LDA MNE-1,X
+00032Er 1  E9 40        	SBC #'A'-1
+000330r 1  A0 05        	LDY #$05
+000332r 1  4A           @LOOP2	LSR
+000333r 1  66 56        	ROR LMNE
+000335r 1  66 57        	ROR RMNE
+000337r 1  88           	DEY
+000338r 1  D0 F8        	BNE @LOOP2
+00033Ar 1  CA           	DEX
+00033Br 1  D0 EE        	BNE @NEXT2
+00033Dr 1               
+00033Dr 1  A2 38        	LDX #NUMMN	; Number of mnemonics
+00033Fr 1  BD rr rr     @LOOP	LDA LMNETB-1,X
+000342r 1  C5 56        	CMP LMNE
+000344r 1  D0 07        	BNE @NXT
+000346r 1  BD rr rr     	LDA RMNETB-1,X
+000349r 1  C5 57        	CMP RMNE
+00034Br 1  F0 03        	BEQ @FND
+00034Dr 1  CA           @NXT	DEX
+00034Er 1  D0 EF        	BNE @LOOP
+000350r 1  CA           @FND	DEX		; X = $FF for failure
+000351r 1               ;	RTS
+000351r 1               
+000351r 1  8A           	TXA
+000352r 1  C9 FF        	CMP #FAIL
+000354r 1  D0 19        	BNE @FOUND
+000356r 1  A5 0B        	LDA MNE		; or a directive?
+000358r 1  C9 2E        	CMP #DOT
+00035Ar 1  D0 0C        	BNE @ERR
+00035Cr 1  A2 05        	LDX #NUMDIR
+00035Er 1  A5 0C        	LDA MNE+1
+000360r 1  DD rr rr     @NEXT	CMP DIRS-1,X
+000363r 1  F0 09        	BEQ @FDIR
+000365r 1  CA           	DEX
+000366r 1  D0 F8        	BNE @NEXT
+000368r 1  68           @ERR	PLA
+000369r 1  A0 01        	LDY #INVMNE
+00036Br 1  4C rr rr     	JMP SHWERR
+00036Er 1  CA           @FDIR	DEX
+00036Fr 1  A8           @FOUND	TAY		; put mnemonic/directive code in Y
+000370r 1  C8           	INY		; offset by 1 so no code $00
+000371r 1  68           	PLA		; restore Y
+000372r 1  AA           	TAX
+000373r 1  94 00        	STY IOBUF,X
+000375r 1  E8           	INX
+000376r 1  A9 0F        	LDA #ARGS
+000378r 1  85 50        	STA MISCL
+00037Ar 1               ;	LDA #EOFLD
+00037Ar 1               ;	STA TEMP1
+00037Ar 1  20 rr rr     	JSR TKNISE
+00037Dr 1  86 2F        	STX XSAV
+00037Fr 1  E6 2F        	INC XSAV
+000381r 1  A9 1D        	LDA #COMM
+000383r 1  85 50        ISCMNT	STA MISCL
+000385r 1  A9 00        	LDA #EOL
+000387r 1  85 54        	STA TEMP1
+000389r 1  85 55        	STA TEMP2
+00038Br 1  20 rr rr     	JSR TKNISE
+00038Er 1  E4 2F        	CPX XSAV
+000390r 1  D0 03        	BNE @RET
+000392r 1  CA           	DEX		; no args or comments, so stop early
+000393r 1  95 FF        	STA <(IOBUF-1),X	; A already holds $00
+000395r 1  60           @RET 	RTS
+000396r 1               
+000396r 1               ONEFLD			; do one entry field
+000396r 1               			; A holds the end point for the field
+000396r 1  85 54        	STA TEMP1	; last position
+000398r 1  20 rr rr     @NEXT	JSR NEXTCH	; catches ESC, CR and BS
+00039Br 1  90 FB        	BCC @NEXT	; only allow legal keys
+00039Dr 1  20 EF FF     	JSR OUTCH	; echo
+0003A0r 1  95 00        	STA IOBUF,X
+0003A2r 1  E8           	INX
+0003A3r 1  C9 20        	CMP #SP
+0003A5r 1  F0 05        	BEQ @FILL
+0003A7r 1  E4 54        	CPX TEMP1
+0003A9r 1  D0 ED        	BNE @NEXT
+0003ABr 1  60           @RET	RTS
+0003ACr 1  A5 54        @FILL	LDA TEMP1
+0003AEr 1  F0 E8        	BEQ @NEXT	; just treat a space normally
+0003B0r 1  E4 54        	CPX TEMP1	; fill spaces
+0003B2r 1  F0 F7        	BEQ @RET
+0003B4r 1  A9 20        	LDA #SP
+0003B6r 1  95 00        	STA IOBUF,X
+0003B8r 1  20 EF FF     	JSR OUTCH
+0003BBr 1  E8           @CONT	INX
+0003BCr 1  D0 EE        	BNE @FILL	; always branches
+0003BEr 1               
+0003BEr 1               ; ****************************************
+0003BEr 1               
+0003BEr 1               INSSPC
+0003BEr 1  B5 FF        	LDA <(IOBUF-1),X	; was previous character a space?
+0003C0r 1  C9 20        	CMP #SP
+0003C2r 1  F0 07        	BEQ @JUMP
+0003C4r 1  20 rr rr     @GET	JSR NEXTCH	; handles BS, CR and ESC
+0003C7r 1  C9 20        	CMP #SP
+0003C9r 1  D0 F9        	BNE @GET	; only let SP through
+0003CBr 1  95 00        @JUMP	STA IOBUF,X	; insert the space
+0003CDr 1  E8           	INX
+0003CEr 1  4C EF FF     	JMP OUTCH
+0003D1r 1               
+0003D1r 1               TKNISE
+0003D1r 1  A0 00        	LDY #$00
+0003D3r 1  B1 50        @NEXT	LDA (MISCL),Y
+0003D5r 1  F0 0B        	BEQ @EOF
+0003D7r 1  C5 55        	CMP TEMP2
+0003D9r 1  F0 07        	BEQ @EOF	; null terminator
+0003DBr 1  95 00        	STA IOBUF,X
+0003DDr 1  E8           	INX
+0003DEr 1  E6 50        	INC MISCL
+0003E0r 1  D0 F1        	BNE @NEXT
+0003E2r 1  A5 54        @EOF	LDA TEMP1
+0003E4r 1  95 00        	STA IOBUF,X
+0003E6r 1  E8           	INX
+0003E7r 1  60           	RTS
+0003E8r 1               
+0003E8r 1               ; ****************************************
+0003E8r 1               
+0003E8r 1               DETKN			; Load a line to the IOBUF
+0003E8r 1               			; (detokenising as necessary)
+0003E8r 1               			; On return, Y holds tokenised size
+0003E8r 1  20 rr rr     	JSR FILLSP
+0003EBr 1  A0 00        	LDY #$00
+0003EDr 1  A2 04        	LDX #LABEL
+0003EFr 1  B1 FC        @LBL	LDA (CURLNL),Y
+0003F1r 1  F0 4D        	BEQ @EOP	; indicates end of program
+0003F3r 1  C9 02        	CMP #BLANK
+0003F5r 1  D0 05        	BNE @SKIP
+0003F7r 1  C8           	INY
+0003F8r 1  A9 00        	LDA #EOL
+0003FAr 1  F0 46        	BEQ @EOL
+0003FCr 1  C9 01        @SKIP	CMP #EOFLD
+0003FEr 1  F0 06        	BEQ @CHK
+000400r 1  95 00        	STA IOBUF,X
+000402r 1  E8           	INX
+000403r 1  C8           	INY
+000404r 1  D0 E9        	BNE @LBL
+000406r 1  A5 04        @CHK	LDA LABEL
+000408r 1  C9 3B        	CMP #CMNT
+00040Ar 1  D0 04        	BNE @NEXT
+00040Cr 1  A2 0B        	LDX #MNE
+00040Er 1  D0 2D        	BNE @CMNT	; always branches
+000410r 1  C8           @NEXT	INY
+000411r 1  B1 FC        	LDA (CURLNL),Y	; get mnemonic code
+000413r 1  AA           	TAX
+000414r 1  CA           	DEX		; correct for offset in tokenise
+000415r 1  86 3C        	STX CURMNE	; store mnemonic for assembler
+000417r 1  E0 38        	CPX #NUMMN
+000419r 1  10 09        	BPL @DIR
+00041Br 1  98           	TYA		; save Y
+00041Cr 1  48           	PHA
+00041Dr 1  20 rr rr     	JSR EXPMNE
+000420r 1  68           	PLA		; restore Y
+000421r 1  A8           	TAY
+000422r 1  D0 06        	BNE @REST
+000424r 1  86 0C        @DIR	STX MNE+1
+000426r 1  A9 2E        	LDA #DOT
+000428r 1  85 0B        	STA MNE
+00042Ar 1  C8           @REST	INY
+00042Br 1  A2 0F        	LDX #ARGS	; point to ARGS area
+00042Dr 1  B1 FC        @LOOP	LDA (CURLNL),Y
+00042Fr 1  F0 11        	BEQ @EOL	; indicates end of line
+000431r 1  C9 01        	CMP #EOFLD
+000433r 1  D0 05        	BNE @CONT
+000435r 1  C8           	INY
+000436r 1  A2 1D        	LDX #COMM	; point to COMM area
+000438r 1  D0 F3        	BNE @LOOP
+00043Ar 1  95 00        @CONT	STA IOBUF,X
+00043Cr 1  E8           	INX
+00043Dr 1  C8           @CMNT	INY
+00043Er 1  D0 ED        	BNE @LOOP
+000440r 1  A2 FE        @EOP	LDX #PRGEND
+000442r 1  95 00        @EOL	STA IOBUF,X
+000444r 1  60           	RTS
+000445r 1               
+000445r 1               ; ****************************************
+000445r 1               ; 		ASSEMBLER CODE
+000445r 1               ; ****************************************
+000445r 1               
+000445r 1               ASSEM			; Run an assembly
+000445r 1  20 rr rr     	JSR INIT	; Set the default values
+000448r 1  20 rr rr     	JSR CRLF
+00044Br 1  20 rr rr     	JSR MYPRPC
+00044Er 1  20 rr rr     @NEXT	JSR DO1LN	; line is in the buffer - parse it
+000451r 1               	;CPX #FAIL
+000451r 1  E8           	INX
+000452r 1  F0 0F        	BEQ SHWERR
+000454r 1  E0 FF        	CPX #PRGEND+1	; +1 because of INX above
+000456r 1  D0 F6        	BNE @NEXT
+000458r 1  E6 58        	INC FRFLAG	; have to resolve them all now - this ensures FRFLAG nonzero
+00045Ar 1  20 rr rr     	JSR PATCH	; back patch any remaining forward references
+00045Dr 1               	;CPX #FAIL
+00045Dr 1  E8           	INX
+00045Er 1  F0 03        	BEQ SHWERR
+000460r 1  4C rr rr     	JMP MYPRPC	; output finishing module end address
+000463r 1               ;.ERR	JMP SHWERR
+000463r 1               
+000463r 1               ; ****************************************
+000463r 1               
+000463r 1               SHWERR			; Show message for error with id in Y
+000463r 1               			; Also display line if appropriate
+000463r 1  20 rr rr     	JSR CRLF
+000466r 1  A2 05        	LDX #ERPRSZ
+000468r 1  BD rr rr     @NEXT	LDA ERRPRE-1,X
+00046Br 1  20 EF FF     	JSR OUTCH
+00046Er 1  CA           	DEX
+00046Fr 1  D0 F7        	BNE @NEXT
+000471r 1  98           	TYA
+000472r 1               	.if UNK_ERR_CHECK
+000472r 1               	BEQ @SKIP
+000472r 1               	CPY #MAXERR+1
+000472r 1               	BCC @SHOW	; If error code valid, show req'd string
+000472r 1               @UNKWN	LDY #UNKERR	; else show unknown error
+000472r 1                	BEQ @SKIP
+000472r 1                	.endif
+000472r 1  18           @SHOW	CLC
+000473r 1  8A           	TXA		; sets A to zero
+000474r 1  69 03        @ADD	ADC #EMSGSZ
+000476r 1  88           	DEY
+000477r 1  D0 FB        	BNE @ADD
+000479r 1  A8           	TAY
+00047Ar 1  A2 03        @SKIP	LDX #EMSGSZ
+00047Cr 1               	.if UNK_ERR_CHECK
+00047Cr 1               @LOOP	LDA ERRMSG,Y
+00047Cr 1               	.else
+00047Cr 1  B9 rr rr     @LOOP	LDA ERRMSG-EMSGSZ,Y
+00047Fr 1               	.endif
+00047Fr 1  20 EF FF     	JSR OUTCH
+000482r 1  C8           	INY
+000483r 1  CA           	DEX
+000484r 1  D0 F6        	BNE @LOOP
+000486r 1               	;LDX #FAIL
+000486r 1  CA           	DEX		; sets X = #FAIL
+000487r 1  A5 59        	LDA ERFLAG
+000489r 1  D0 26        	BNE RET1
+00048Br 1  4C rr rr     	JMP PRNTLN
+00048Er 1               
+00048Er 1               ; ****************************************
+00048Er 1               
+00048Er 1               INIT
+00048Er 1  20 rr rr     	JSR TOSTRT	; leaves $00 in A
+000491r 1  85 58        	STA FRFLAG
+000493r 1  85 EB        	STA NGSYM
+000495r 1  85 E9        	STA GSYMTL
+000497r 1  85 F5        	STA CURPCL	; Initial value of PC for the assembled code
+000499r 1  A5 F8        	LDA CODEH
+00049Br 1  85 F6        	STA CURPCH
+00049Dr 1  20 rr rr     	JSR CLRLCL	; set local and FREF table pointers
+0004A0r 1  86 EA        	STX GSYMTH	; global table high byte - in X from CLRLCL
+0004A2r 1               ;	JMP INITFR
+0004A2r 1               ; falls through
+0004A2r 1               
+0004A2r 1               ; ****************************************
+0004A2r 1               
+0004A2r 1               INITFR			; initialise the FREF table and related pointers
+0004A2r 1  A9 00        	LDA #$00
+0004A4r 1  85 2B        	STA NFREF
+0004A6r 1  85 29        	STA FREFTL
+0004A8r 1  85 46        	STA PTCHTL
+0004AAr 1  A4 F9        	LDY TABLEH
+0004ACr 1  C8           	INY
+0004ADr 1  84 2A        	STY FREFTH
+0004AFr 1  84 47        	STY PTCHTH
+0004B1r 1  60           RET1	RTS
+0004B2r 1               
+0004B2r 1               ; ****************************************
+0004B2r 1               
+0004B2r 1               DO1LN
+0004B2r 1  20 rr rr     	JSR DETKN
+0004B5r 1  E0 FE        	CPX #PRGEND
+0004B7r 1  F0 1D        	BEQ @ENDPR
+0004B9r 1  E0 04        	CPX #LABEL	; means we are still at the first field => blank line
+0004BBr 1  F0 18        	BEQ @DONE
+0004BDr 1  A9 00        	LDA #$00
+0004BFr 1  85 59        	STA ERFLAG
+0004C1r 1  85 58        	STA FRFLAG
+0004C3r 1  85 5A        	STA HADFRF
+0004C5r 1  20 rr rr     	JSR PARSE
+0004C8r 1  E0 FF        	CPX #FAIL
+0004CAr 1  F0 1D        	BEQ DORTS
+0004CCr 1  A0 00        @CONT	LDY #$00
+0004CEr 1  B1 FC        @LOOP	LDA (CURLNL),Y
+0004D0r 1  F0 03        	BEQ @DONE
+0004D2r 1  C8           	INY
+0004D3r 1  D0 F9        	BNE @LOOP
+0004D5r 1  C8           @DONE	INY		; one more to skip the null
+0004D6r 1               @ENDPR	;JMP UPDTCL
+0004D6r 1               ; falls through
+0004D6r 1               
+0004D6r 1               ; ****************************************
+0004D6r 1               
+0004D6r 1               UPDTCL			; update the current line pointer
+0004D6r 1               			; by the number of bytes in Y
+0004D6r 1  A5 FC        	LDA CURLNL
+0004D8r 1  84 44        	STY SCRTCH
+0004DAr 1  18           	CLC
+0004DBr 1  65 44        	ADC SCRTCH	; move the current line pointer forward by 'Y' bytes
+0004DDr 1  85 FC        	STA CURLNL
+0004DFr 1  90 02        	BCC INCLN
+0004E1r 1  E6 FD        	INC CURLNH	; increment the high byte if necessary
+0004E3r 1               INCLN
+0004E3r 1  E6 FA        	INC LINEL
+0004E5r 1  D0 02        	BNE DORTS
+0004E7r 1  E6 FB        	INC LINEH
+0004E9r 1  60           DORTS	RTS		; global label so can be shared
+0004EAr 1               
+0004EAr 1               ; ****************************************
+0004EAr 1               
+0004EAr 1               MKOBJC			; MNE is in CURMNE, addr mode is in CURADM
+0004EAr 1               			; and the args are in LVALL,H
+0004EAr 1               			; calculate the object code, and update PC
+0004EAr 1  A4 3C        	LDY CURMNE
+0004ECr 1  B9 rr rr     	LDA BASE,Y	; get base value for current mnemonic
+0004EFr 1  A6 3D        	LDX CURADM
+0004F1r 1  18           	CLC
+0004F2r 1  7D rr rr     	ADC OFFSET,X	; add in the offset
+0004F5r 1  E0 0B        	CPX #ABY	; handle exception
+0004F7r 1  F0 0E        	BEQ @CHABY
+0004F9r 1  E0 02        	CPX #IMM
+0004FBr 1  D0 11        	BNE @CONT
+0004FDr 1  C0 28        	CPY #$28	; immediate mode need to adjust a range
+0004FFr 1  30 0D        	BMI @CONT
+000501r 1  C0 30        	CPY #$2F+1
+000503r 1  B0 09        	BCS @CONT
+000505r 1  69 08        	ADC #ADJIMM	; carry is clear
+000507r 1               	;BNE .CONT
+000507r 1  C0 35        @CHABY	CPY #$35
+000509r 1  D0 03        	BNE @CONT
+00050Br 1  18           	CLC
+00050Cr 1  69 04        	ADC #ADJABY
+00050Er 1  20 rr rr     @CONT	JSR DOBYTE	; we have the object code
+000511r 1               	.IF BRKAS2
+000511r 1  C9 00        	CMP #$00
+000513r 1  D0 03        	BNE @MKARG
+000515r 1  20 rr rr     	JSR DOBYTE
+000518r 1               	.ENDIF
+000518r 1               @MKARG			; where appropriate, the arg value is in LVALL,H
+000518r 1               			; copy to ARGS and null terminate
+000518r 1  8A           	TXA		; quick check for X=0
+000519r 1  F0 CE        	BEQ DORTS	; IMP - no args
+00051Br 1  CA           	DEX
+00051Cr 1  F0 CB        	BEQ DORTS	; ACC - no args
+00051Er 1  A5 3E        	LDA LVALL	; needed for .BYT handling
+000520r 1               	; word arg if X is greater than or equal to ABS
+000520r 1  E0 08        	CPX #ABS-1
+000522r 1  30 05        	BMI DOBYTE	; X < #ABS
+000524r 1  20 rr rr     DOWORD	JSR DOBYTE
+000527r 1  A5 3F        	LDA LVALH
+000529r 1  A0 00        DOBYTE	LDY #$00
+00052Br 1  91 F5        	STA (CURPCL),Y
+00052Dr 1               ;	JMP INCPC
+00052Dr 1               ; falls through
+00052Dr 1               
+00052Dr 1               ; ****************************************
+00052Dr 1               
+00052Dr 1               INCPC			; increment the PC
+00052Dr 1  E6 F5        	INC CURPCL
+00052Fr 1  D0 02        	BNE @DONE	; any carry?
+000531r 1  E6 F6        	INC CURPCH	; yes
+000533r 1  60           @DONE	RTS
+000534r 1               
+000534r 1               ; ****************************************
+000534r 1               
+000534r 1               CALCAM			; work out the addressing mode
+000534r 1  20 rr rr     	JSR ADDMOD
+000537r 1  E0 FF        	CPX #FAIL
+000539r 1  D0 AF        	BNE MKOBJC
+00053Br 1  A0 02        	LDY #ILLADM	; Illegal address mode error
+00053Dr 1  60           	RTS
+00053Er 1               
+00053Er 1               PARSE			; Parse one line and validate
+00053Er 1  A5 04        	LDA LABEL
+000540r 1  C9 3B        	CMP #CMNT
+000542r 1  F0 A5        	BEQ DORTS	; ignore comment lines
+000544r 1  A6 0B        	LDX MNE		; first need to check for an equate
+000546r 1  E0 2E        	CPX #DOT
+000548r 1  D0 0D        	BNE @NOEQU
+00054Ar 1  A6 0C        	LDX MNE+1
+00054Cr 1  E0 4D        	CPX #MOD	; Do we have a new module?
+00054Er 1  D0 03        	BNE @NOMOD
+000550r 1  4C rr rr     	JMP DOMOD
+000553r 1  E0 3D        @NOMOD	CPX #EQU
+000555r 1  F0 47        	BEQ DOEQU
+000557r 1  C9 20        @NOEQU	CMP #SP		; Is there a label?
+000559r 1  F0 03        	BEQ @NOLABL
+00055Br 1  20 rr rr     	JSR PCSYM	; save the symbol value - in this case it is the PC
+00055Er 1  A5 0B        @NOLABL	LDA MNE
+000560r 1  C9 2E        	CMP #DOT	; do we have a directive?
+000562r 1  D0 D0        	BNE CALCAM 	; no
+000564r 1               
+000564r 1               ; ****************************************
+000564r 1               
+000564r 1               DODIR
+000564r 1  A2 00        	LDX #$00	; handle directives (except equate and module)
+000566r 1  A5 0C        	LDA MNE+1
+000568r 1  C9 53        	CMP #STR
+00056Ar 1  F0 19        	BEQ DOSTR
+00056Cr 1  85 58        	STA FRFLAG	; Disallows forward references
+00056Er 1  20 rr rr     	JSR QTEVAL
+000571r 1               	;CPX #FAIL
+000571r 1  E8           	INX
+000572r 1  F0 0C        	BEQ DIRERR
+000574r 1  A5 3E        	LDA LVALL
+000576r 1  A6 0C        	LDX MNE+1
+000578r 1  E0 57        	CPX #WORD
+00057Ar 1  F0 A8        	BEQ DOWORD
+00057Cr 1  A6 3F        	LDX LVALH
+00057Er 1  F0 A9        	BEQ DOBYTE
+000580r 1  A0 03        DIRERR	LDY #SYNTAX
+000582r 1  A2 FF        	LDX #FAIL
+000584r 1  60           	RTS
+000585r 1  B5 0F        DOSTR	LDA ARGS,X
+000587r 1  C9 27        	CMP #QUOTE
+000589r 1  D0 F5        	BNE DIRERR	; String invalid
+00058Br 1  E8           @LOOP	INX
+00058Cr 1  B5 0F        	LDA ARGS,X
+00058Er 1  F0 F0        	BEQ DIRERR	; end found before string closed - error
+000590r 1  C9 27        	CMP #QUOTE
+000592r 1  F0 09        	BEQ DIROK
+000594r 1  20 rr rr     	JSR DOBYTE	; just copy over the bytes
+000597r 1  E0 0E        	CPX #ARGSZ	; can't go over the size limit
+000599r 1  D0 F0        	BNE @LOOP
+00059Br 1  F0 E3        	BEQ DIRERR	; hit the limit without a closing quote - error
+00059Dr 1  60           DIROK	RTS
+00059Er 1               
+00059Er 1               ; ****************************************
+00059Er 1               
+00059Er 1               DOEQU
+00059Er 1               	;LDA LABEL
+00059Er 1  85 58        	STA FRFLAG
+0005A0r 1  20 rr rr     	JSR CHKALN	; label must be global
+0005A3r 1  90 DB        	BCC DIRERR	; MUST have a label for an equate
+0005A5r 1  A2 00        	LDX #$00
+0005A7r 1  20 rr rr     	JSR QTEVAL	; work out the associated value
+0005AAr 1               	;CPX #FAIL
+0005AAr 1  E8           	INX
+0005ABr 1  F0 D3        	BEQ DIRERR
+0005ADr 1  4C rr rr     	JMP STRSYM
+0005B0r 1               
+0005B0r 1               ; ****************************************
+0005B0r 1               
+0005B0r 1               DOMOD			; Do we have a new module?
+0005B0r 1               	;LDA LABEL
+0005B0r 1  20 rr rr     	JSR CHKALN	; must have a global label
+0005B3r 1  90 CB        	BCC DIRERR
+0005B5r 1  A0 00        	LDY #$00
+0005B7r 1  A5 0F        	LDA ARGS
+0005B9r 1  F0 14        	BEQ @STORE
+0005BBr 1  C9 20        	CMP #SP
+0005BDr 1  F0 10        	BEQ @STORE
+0005BFr 1  20 rr rr     @SETPC	JSR ATOFR	; output finishing module end address (+1)
+0005C2r 1  A2 00        	LDX #$00	; set a new value for the PC from the args
+0005C4r 1  A5 0F        	LDA ARGS
+0005C6r 1  20 rr rr     	JSR CONVRT
+0005C9r 1               	;CPX #FAIL
+0005C9r 1  E8           	INX
+0005CAr 1  F0 B4        	BEQ DIRERR
+0005CCr 1  20 rr rr     	JSR LVTOPC
+0005CFr 1  20 rr rr     @STORE	JSR PCSYM
+0005D2r 1  E0 FF        	CPX #FAIL
+0005D4r 1  F0 C7        	BEQ DIROK
+0005D6r 1  20 rr rr     	JSR PATCH
+0005D9r 1  E0 FF        	CPX #FAIL
+0005DBr 1  F0 C0        	BEQ DIROK
+0005DDr 1  20 rr rr     	JSR SHWMOD
+0005E0r 1  A9 00        	LDA #$00	; reset patch flag
+0005E2r 1  20 rr rr     	JSR ATOFR	; output new module start address
+0005E5r 1               ;	JMP CLRLCL
+0005E5r 1               ; falls through
+0005E5r 1               
+0005E5r 1               ; ****************************************
+0005E5r 1               
+0005E5r 1               CLRLCL			; clear the local symbol table
+0005E5r 1  A2 00        	LDX #$00	; this also clears any errors
+0005E7r 1  86 EE        	STX NLSYM	; to their starting values
+0005E9r 1  86 EC        	STX LSYMTL
+0005EBr 1  A6 F9        	LDX TABLEH	; and then the high bytes
+0005EDr 1  86 ED        	STX LSYMTH
+0005EFr 1  60           	RTS
+0005F0r 1               
+0005F0r 1               ; ****************************************
+0005F0r 1               
+0005F0r 1  85 58        ATOFR	STA FRFLAG
+0005F2r 1               ;	JMP MYPRPC
+0005F2r 1               ; falls through
+0005F2r 1               
+0005F2r 1               ; ****************************************
+0005F2r 1               
+0005F2r 1               MYPRPC
+0005F2r 1  A5 F6        	LDA CURPCH
+0005F4r 1  A6 F5        	LDX CURPCL
+0005F6r 1  A4 58        	LDY FRFLAG	; flag set => print dash and minus 1
+0005F8r 1  F0 0D        	BEQ @NODEC
+0005FAr 1  48           	PHA
+0005FBr 1  20 rr rr     	JSR PRDASH
+0005FEr 1  68           	PLA
+0005FFr 1  E0 00        	CPX #$00
+000601r 1  D0 03        	BNE @SKIP	; is X zero?
+000603r 1  38           	SEC
+000604r 1  E9 01        	SBC #$01
+000606r 1  CA           @SKIP	DEX
+000607r 1  4C rr rr     @NODEC	JMP PRNTAX
+00060Ar 1               
+00060Ar 1               ; ****************************************
+00060Ar 1               
+00060Ar 1               PATCH			; back patch in the forward reference symbols
+00060Ar 1               			; all are words
+00060Ar 1  A6 2B        	LDX NFREF
+00060Cr 1  F0 72        	BEQ @RET	; nothing to do
+00060Er 1  86 59        	STX ERFLAG	; set flag
+000610r 1  86 45        @STRPC	STX NPTCH
+000612r 1  A5 F5        	LDA CURPCL	; save the PC on the stack
+000614r 1  48           	PHA
+000615r 1  A5 F6        	LDA CURPCH
+000617r 1  48           	PHA
+000618r 1  20 rr rr     	JSR INITFR
+00061Br 1  A0 00        @NEXT	LDY #$00
+00061Dr 1  A5 58        	LDA FRFLAG
+00061Fr 1  85 48        	STA FLGSAV	; so I can restore the FREF flag
+000621r 1  84 5A        	STY HADFRF
+000623r 1  B1 46        	LDA (PTCHTL),Y
+000625r 1  C9 2E        	CMP #DOT
+000627r 1  D0 02        	BNE @LOOP
+000629r 1  85 58        	STA FRFLAG	; nonzero means must resolve local symbols
+00062Br 1  B1 46        @LOOP	LDA (PTCHTL),Y	; copy symbol to COMM
+00062Dr 1  99 1D 00     	STA COMM,Y
+000630r 1  C8           	INY
+000631r 1  C0 06        	CPY #SYMSZ
+000633r 1  D0 F6        	BNE @LOOP
+000635r 1  B1 46        	LDA (PTCHTL),Y	; get the PC for this symbol
+000637r 1  85 F5        	STA CURPCL
+000639r 1  C8           	INY
+00063Ar 1  B1 46        	LDA (PTCHTL),Y
+00063Cr 1  85 F6        	STA CURPCH
+00063Er 1  C8           	INY
+00063Fr 1  B1 46        	LDA (PTCHTL),Y
+000641r 1  85 54        	STA TEMP1	; save any offset value
+000643r 1  20 rr rr     	JSR DOLVAL	; get the symbols true value
+000646r 1  E0 FF        	CPX #FAIL	; value now in LVALL,H or error
+000648r 1  F0 47        	BEQ @ERR
+00064Ar 1  A5 5A        	LDA HADFRF	; if we have a persistent FREF
+00064Cr 1  F0 04        	BEQ @CONT	; need to copy its offset as well
+00064Er 1  A5 54        	LDA TEMP1
+000650r 1  91 50        	STA (MISCL),Y	; falls through to some meaningless patching...
+000652r 1               	;SEC		; unless I put these two in
+000652r 1               	;BCS .MORE
+000652r 1  20 rr rr     @CONT	JSR ADD16X
+000655r 1  A0 00        	LDY #$00
+000657r 1  B1 F5        	LDA (CURPCL),Y	; get the opcode
+000659r 1  29 1F        	AND #$1F	; check for branch opcode - format XXY10000
+00065Br 1  C9 10        	CMP #$10
+00065Dr 1  F0 22        	BEQ @BRA
+00065Fr 1  20 rr rr     	JSR INCPC	; skip the opcode
+000662r 1  A5 3E        @SKIP	LDA LVALL
+000664r 1  20 rr rr     	JSR DOWORD
+000667r 1  18           @MORE	CLC
+000668r 1  A5 46        	LDA PTCHTL	; move to the next symbol
+00066Ar 1  69 09        	ADC #SYMSZ+3
+00066Cr 1  85 46        	STA PTCHTL
+00066Er 1  90 02        	BCC @DECN
+000670r 1  E6 47        	INC PTCHTH
+000672r 1  A5 48        @DECN	LDA FLGSAV
+000674r 1  85 58        	STA FRFLAG
+000676r 1  C6 45        	DEC NPTCH
+000678r 1  D0 A1        	BNE @NEXT
+00067Ar 1  68           @DONE	PLA
+00067Br 1  85 F6        	STA CURPCH	; restore the PC from the stack
+00067Dr 1  68           	PLA
+00067Er 1  85 F5        	STA CURPCL
+000680r 1  60           @RET	RTS
+000681r 1  20 rr rr     @BRA	JSR ADDOFF	; BRA instructions have a 1 byte offset argument only
+000684r 1  E0 FF        	CPX #FAIL
+000686r 1  F0 09        	BEQ @ERR
+000688r 1  A0 01        	LDY #$01	; save the offset at PC + 1
+00068Ar 1  A5 3E        	LDA LVALL
+00068Cr 1  91 F5        	STA (CURPCL),Y
+00068Er 1  4C rr rr     	JMP @MORE
+000691r 1  A0 00        @ERR	LDY #$00
+000693r 1  20 rr rr     	JSR OUTSP
+000696r 1  B1 46        @LOOP2	LDA (PTCHTL),Y	; Show symbol that failed
+000698r 1  20 EF FF     	JSR OUTCH
+00069Br 1  C8           	INY
+00069Cr 1  C0 06        	CPY #SYMSZ
+00069Er 1  D0 F6        	BNE @LOOP2
+0006A0r 1  88           	DEY		; Since #UNKSYM = #SYMSZ - 1
+0006A1r 1  D0 D7        	BNE @DONE	; always branches
+0006A3r 1               
+0006A3r 1               ; ****************************************
+0006A3r 1               
+0006A3r 1               ADDMOD			; Check the arguments and work out the
+0006A3r 1               			; addressing mode
+0006A3r 1               			; return mode in X
+0006A3r 1  A2 FF        	LDX #$FF	; default error value for mode
+0006A5r 1  86 3D        	STX CURADM	; save it
+0006A7r 1  A5 3C        	LDA CURMNE
+0006A9r 1  A6 0F        	LDX ARGS	; Start checking the format...
+0006ABr 1  F0 04        	BEQ @EOL
+0006ADr 1  E0 20        	CPX #SP
+0006AFr 1  D0 0E        	BNE @NOTSP
+0006B1r 1  A2 00        @EOL	LDX #IMP	; implied mode - space
+0006B3r 1  20 rr rr     	JSR CHKMOD	; check command is ok with this mode
+0006B6r 1  E0 FF        	CPX #FAIL	; not ok
+0006B8r 1  D0 35        	BNE @RET	; may still be accumulator mode though
+0006BAr 1  A2 01        	LDX #ACC	; accumulator mode - space
+0006BCr 1  4C rr rr     	JMP CHKMOD	; check command is ok with this mode
+0006BFr 1  E0 23        @NOTSP	CPX #IMV	; immediate mode - '#'
+0006C1r 1  F0 0E        	BEQ @DOIMM
+0006C3r 1  A2 03        	LDX #REL
+0006C5r 1  20 rr rr     	JSR CHKMOD	; check if command is a branch
+0006C8r 1  E0 FF        	CPX #FAIL
+0006CAr 1  F0 24        	BEQ @NOTREL
+0006CCr 1  A5 0F        	LDA ARGS
+0006CEr 1  4C rr rr     	JMP DOREL
+0006D1r 1  C9 2C        @DOIMM	CMP #$2C	; check exception first - STA
+0006D3r 1  F0 71        	BEQ BAD
+0006D5r 1  A2 02        	LDX #IMM
+0006D7r 1  C9 35        	CMP #$35	; check inclusion first - STX
+0006D9r 1  F0 07        	BEQ @IMMOK
+0006DBr 1  20 rr rr     	JSR CHKMOD	; check command is ok with this mode
+0006DEr 1  E0 FF        	CPX #FAIL
+0006E0r 1  F0 0D        	BEQ @RET
+0006E2r 1  86 3D        @IMMOK	STX CURADM	; handle immediate mode
+0006E4r 1               	;LDX #01	; skip the '#'
+0006E4r 1  CA           	DEX		; X == IMM == 2
+0006E5r 1  20 rr rr     	JSR QTEVAL
+0006E8r 1  E8           	INX
+0006E9r 1  F0 5B        	BEQ BAD
+0006EBr 1  A5 3F        	LDA LVALH
+0006EDr 1  D0 57        	BNE BAD
+0006EFr 1               	;LDX #IMM
+0006EFr 1  60           @RET	RTS
+0006F0r 1  A2 00        @NOTREL LDX #0		; check the more complicated modes
+0006F2r 1  A5 0F        	LDA ARGS
+0006F4r 1  C9 28        	CMP #OPEN	; indirection?
+0006F6r 1  D0 01        	BNE @CONT	; no
+0006F8r 1  E8           	INX		; skip the '('
+0006F9r 1  20 rr rr     @CONT	JSR EVAL
+0006FCr 1  E0 FF        	CPX #FAIL
+0006FEr 1  F0 EF        	BEQ @RET
+000700r 1  20 rr rr     	JSR FMT2AM	; calculate the addressing mode from the format
+000703r 1  E0 FF        	CPX #FAIL
+000705r 1  F0 E8        	BEQ @RET
+000707r 1  86 3D        	STX CURADM
+000709r 1               ;	JMP CHKEXS
+000709r 1               ; falls through
+000709r 1               
+000709r 1               ; ****************************************
+000709r 1               
+000709r 1               CHKEXS			; Current addressing mode is in X
+000709r 1  E0 06        	CPX #ZPY	; for MNE indices 28 to 2F, ZPY is illegal
+00070Br 1  D0 0E        	BNE @CONT	; but ABY is ok, so promote byte argument to word
+00070Dr 1  A5 3C        	LDA CURMNE
+00070Fr 1  C9 28        	CMP #$28
+000711r 1  90 08        	BCC @CONT
+000713r 1  C9 30        	CMP #$2F+1
+000715r 1  B0 04        	BCS @CONT
+000717r 1  A2 0B        	LDX #ABY	; updated addressing mode
+000719r 1  D0 28        	BNE OK
+00071Br 1  A0 06        @CONT	LDY #SPCNT	; check special includes
+00071Dr 1  B9 rr rr     @LOOP	LDA SPINC1-1,Y	; load mnemonic code
+000720r 1  C5 3C        	CMP CURMNE
+000722r 1  D0 0E        	BNE @NEXT
+000724r 1  BE rr rr     	LDX SPINC2-1,Y	; load addressing mode
+000727r 1  E4 3D        	CPX CURADM
+000729r 1  F0 18        	BEQ OK		; match - so ok
+00072Br 1  BE rr rr     	LDX SPINC3-1,Y	; load addressing mode
+00072Er 1  E4 3D        	CPX CURADM
+000730r 1  F0 11        	BEQ OK		; match - so ok
+000732r 1  88           @NEXT	DEY
+000733r 1  D0 E8        	BNE @LOOP
+000735r 1  A6 3D        	LDX CURADM
+000737r 1               ;	BNE CHKMOD	; wasn't in the exceptions table - check normally
+000737r 1               ; falls through
+000737r 1               
+000737r 1               ; ****************************************
+000737r 1               
+000737r 1  A5 3C        CHKMOD	LDA CURMNE	; always > 0
+000739r 1  DD rr rr     	CMP MIN,X	; mode index in X
+00073Cr 1  90 08        	BCC BAD		; mnemonic < MIN
+00073Er 1  DD rr rr     	CMP MAX,X	; MAX,X holds actually MAX + 1
+000741r 1  B0 03        	BCS BAD		; mnemonic > MAX
+000743r 1  86 3D        OK	STX CURADM	; save mode
+000745r 1  60           	RTS
+000746r 1               
+000746r 1               ; ****************************************
+000746r 1               
+000746r 1  A2 FF        BAD	LDX #FAIL	; Illegal addressing mode error
+000748r 1  60           	RTS
+000749r 1               DOREL
+000749r 1  A2 00        	LDX #$00
+00074Br 1  86 3E        	STX LVALL
+00074Dr 1  86 3F        	STX LVALH
+00074Fr 1  C9 2A        	CMP #PC		; PC relative mode - '*'
+000751r 1  D0 06        	BNE DOLBL
+000753r 1  20 rr rr     	JSR PCTOLV
+000756r 1  20 rr rr     	JSR XCONT
+000759r 1               ;	JMP ADDOFF	; just do an unnecessary EVAL and save 3 bytes
+000759r 1  20 rr rr     DOLBL	JSR EVAL	; we have a label
+00075Cr 1  38           ADDOFF	SEC		; calculate relative offset as LVALL,H - PC
+00075Dr 1  A5 3E        	LDA LVALL
+00075Fr 1  E5 F5        	SBC CURPCL
+000761r 1  85 3E        	STA LVALL
+000763r 1  A5 3F        	LDA LVALH
+000765r 1  E5 F6        	SBC CURPCH
+000767r 1  85 3F        	STA LVALH
+000769r 1  F0 04        	BEQ DECLV	; error if high byte nonzero
+00076Br 1  E6 3F        	INC LVALH
+00076Dr 1  D0 D7        	BNE BAD		; need either $00 or $FF
+00076Fr 1  C6 3E        DECLV	DEC LVALL
+000771r 1  C6 3E        	DEC LVALL
+000773r 1  60           RELOK	RTS		; need to end up with offset value in LVALL
+000774r 1               ;ERROFF	LDX #FAIL
+000774r 1               ;	RTS
+000774r 1               
+000774r 1               ; ****************************************
+000774r 1               
+000774r 1               QTEVAL			; evaluate an expression possibly with a quote
+000774r 1  B5 0F        	LDA ARGS,X
+000776r 1  F0 CE        	BEQ BAD
+000778r 1  C9 27        	CMP #QUOTE
+00077Ar 1  F0 03        	BEQ QCHAR
+00077Cr 1  4C rr rr     	JMP EVAL
+00077Fr 1  E8           QCHAR	INX
+000780r 1  A9 00        	LDA #$0
+000782r 1  85 3F        	STA LVALH	; quoted char must be a single byte
+000784r 1  B5 0F        	LDA ARGS,X	; get the character
+000786r 1  85 3E        	STA LVALL
+000788r 1  E8           	INX		; check and skip the closing quote
+000789r 1  B5 0F        	LDA ARGS,X
+00078Br 1  C9 27        	CMP #QUOTE
+00078Dr 1  D0 B7        	BNE BAD
+00078Fr 1  E8           	INX
+000790r 1  B5 0F        	LDA ARGS,X
+000792r 1  F0 7C        	BEQ XDONE
+000794r 1  C9 20        	CMP #SP
+000796r 1  F0 78        	BEQ XDONE
+000798r 1               ;	JMP DOPLMN
+000798r 1               ; falls through
+000798r 1               
+000798r 1               ; ****************************************
+000798r 1               
+000798r 1               DOPLMN			; handle a plus/minus expression
+000798r 1               			; on entry, A holds the operator, and X the location
+000798r 1               			; store the result in LVALL,H
+000798r 1  48           	PHA		; save the operator
+000799r 1  E8           	INX		; move forward
+00079Ar 1  B5 0F        	LDA ARGS,X	; first calculate the value of the byte
+00079Cr 1  20 rr rr     	JSR BYT2HX
+00079Fr 1  E0 FF        	CPX #FAIL
+0007A1r 1  D0 02        	BNE @CONT
+0007A3r 1  68           	PLA
+0007A4r 1               ;	LDX #FAIL	; X is already $FF
+0007A4r 1  60           @RET	RTS
+0007A5r 1  85 54        @CONT	STA TEMP1	; store the value of the byte in TEMP1
+0007A7r 1  68           	PLA
+0007A8r 1  C9 2B        	CMP #PLUS
+0007AAr 1  F0 09        	BEQ @NONEG
+0007ACr 1  A5 54        	LDA TEMP1
+0007AEr 1  18           	CLC		; for minus, need to negate it
+0007AFr 1  49 FF        	EOR #$FF
+0007B1r 1  69 01        	ADC #$1
+0007B3r 1  85 54        	STA TEMP1
+0007B5r 1  A5 5A        @NONEG	LDA HADFRF
+0007B7r 1  F0 04        	BEQ @SKIP
+0007B9r 1  A5 54        	LDA TEMP1	; save the offset for use when patching
+0007BBr 1  91 50        	STA (MISCL),Y
+0007BDr 1               @SKIP	;JMP ADD16X
+0007BDr 1               ; falls through
+0007BDr 1               
+0007BDr 1               ; ****************************************
+0007BDr 1               
+0007BDr 1               ADD16X			; Add a signed 8 bit number in TEMP1
+0007BDr 1               			; to a 16 bit number in LVALL,H
+0007BDr 1               			; preserve X (thanks leeeeee, www.6502.org/forum)
+0007BDr 1  A5 54        	LDA TEMP1	; signed 8 bit number
+0007BFr 1  10 02        	BPL @CONT
+0007C1r 1  C6 3F        	DEC LVALH	; bit 7 was set, so it's a negative
+0007C3r 1  18           @CONT	CLC
+0007C4r 1  65 3E        	ADC LVALL
+0007C6r 1  85 3E        	STA LVALL	; update the stored number low byte
+0007C8r 1  90 02        	BCC @EXIT
+0007CAr 1  E6 3F        	INC LVALH	; update the stored number high byte
+0007CCr 1  60           @EXIT	RTS
+0007CDr 1               
+0007CDr 1               ; ****************************************
+0007CDr 1               
+0007CDr 1               EVAL			; Evaluate an argument expression
+0007CDr 1               			; X points to offset from ARGS of the start
+0007CDr 1               			; on exit we have the expression replaced
+0007CDr 1               			; by the required constant
+0007CDr 1  86 56        	STX TEMP3	; store start of the expression
+0007CFr 1  B5 0F        	LDA ARGS,X
+0007D1r 1  C9 3C        	CMP #LOBYTE
+0007D3r 1  F0 04        	BEQ @HASOP
+0007D5r 1  C9 3E        	CMP #HIBYTE
+0007D7r 1  D0 05        	BNE @DOLBL
+0007D9r 1  85 58        @HASOP	STA FRFLAG	; disables forward references when there
+0007DBr 1  E8           	INX		; is a '<' or a '>' in the expression
+0007DCr 1  B5 0F        	LDA ARGS,X
+0007DEr 1  20 rr rr     @DOLBL	JSR CHKLBL	; is there a label?
+0007E1r 1  B0 09        	BCS @LBL	; yes - get its value
+0007E3r 1  20 rr rr     	JSR CONVRT	; convert the ASCII
+0007E6r 1  E0 FF        	CPX #FAIL
+0007E8r 1  F0 24        	BEQ XERR
+0007EAr 1  D0 0B        	BNE XCONT
+0007ECr 1  86 2F        @LBL	STX XSAV	; move X to Y
+0007EEr 1  20 rr rr     	JSR LB2VAL	; yes - get its value
+0007F1r 1  E0 FF        	CPX #FAIL
+0007F3r 1  F0 1B        	BEQ XDONE
+0007F5r 1  A6 2F        	LDX XSAV
+0007F7r 1  E8           XCONT	INX		; skip the '$'
+0007F8r 1  B5 0F        	LDA ARGS,X	; Value now in LVALL,H for ASCII or LABEL
+0007FAr 1  20 rr rr     	JSR CHKLBL
+0007FDr 1  B0 F8        	BCS XCONT	; Continue until end of label or digits
+0007FFr 1               	;STX TEMP4	; Store end index
+0007FFr 1  C9 2B        	CMP #PLUS
+000801r 1  F0 04        	BEQ @DOOP
+000803r 1  C9 2D        	CMP #MINUS
+000805r 1  D0 0A        	BNE XCHKOP
+000807r 1  20 rr rr     @DOOP	JSR DOPLMN
+00080Ar 1  E0 FF        	CPX #FAIL
+00080Cr 1  D0 E9        	BNE XCONT
+00080Er 1  A0 03        XERR	LDY #SYNTAX	; argument syntax error
+000810r 1  60           XDONE	RTS
+000811r 1  A0 00        XCHKOP	LDY #$00
+000813r 1  A5 58        	LDA FRFLAG
+000815r 1  C9 3C        	CMP #LOBYTE
+000817r 1  F0 08        	BEQ @GETLO
+000819r 1  C9 3E        	CMP #HIBYTE
+00081Br 1  D0 06        	BNE @STORE
+00081Dr 1  A5 3F        	LDA LVALH	; move LVALH to LVALL
+00081Fr 1  85 3E        	STA LVALL
+000821r 1  84 3F        @GETLO	STY LVALH	; keep LVALL, and zero LVALH
+000823r 1  B5 0F        @STORE	LDA ARGS,X	; copy rest of args to COMM
+000825r 1  99 1D 00     	STA COMM,Y
+000828r 1  F0 0A        	BEQ @DOVAL
+00082Ar 1  C9 20        	CMP #SP
+00082Cr 1  F0 06        	BEQ @DOVAL
+00082Er 1  E8           	INX
+00082Fr 1  C8           	INY
+000830r 1  E0 0E        	CPX #ARGSZ
+000832r 1  D0 EF        	BNE @STORE
+000834r 1  A9 00        @DOVAL	LDA #$00
+000836r 1  99 1D 00     	STA COMM,Y
+000839r 1  A4 56        	LDY TEMP3	; get start index
+00083Br 1  A9 24        	LDA #HEX	; put the '$" back in so subsequent code
+00083Dr 1  99 0F 00     	STA ARGS,Y	; manages the value properly
+000840r 1  C8           	INY
+000841r 1  A5 3F        	LDA LVALH
+000843r 1  F0 03        	BEQ @DOLO
+000845r 1  20 rr rr     	JSR HX2ASC
+000848r 1  A5 3E        @DOLO	LDA LVALL
+00084Ar 1  20 rr rr     	JSR HX2ASC
+00084Dr 1  A2 00        	LDX #$00	; bring back the rest from IOBUF
+00084Fr 1  B5 1D        @COPY	LDA COMM,X
+000851r 1  99 0F 00     	STA ARGS,Y	; store at offset Y from ARGS
+000854r 1  F0 BA        	BEQ XDONE
+000856r 1  E8           	INX
+000857r 1  C8           	INY
+000858r 1  D0 F5        	BNE @COPY
+00085Ar 1               
+00085Ar 1               ; ****************************************
+00085Ar 1               
+00085Ar 1               LB2VAL			; label to be evaluated is in ARGS + X (X = 0 or 1)
+00085Ar 1  A0 00        	LDY #$00
+00085Cr 1  C0 06        @NEXT	CPY #LBLSZ	; all chars done
+00085Er 1  F0 18        	BEQ DOLVAL
+000860r 1  20 rr rr     	JSR CHKLBL	; has the label finished early?
+000863r 1  90 09        	BCC @STOP
+000865r 1  99 1D 00     	STA COMM,Y	; copy because we need exactly 6 chars for the search
+000868r 1  E8           	INX		; COMM isn't used in parsing, so it
+000869r 1  B5 0F        	LDA ARGS,X	; can be treated as scratch space
+00086Br 1  C8           	INY
+00086Cr 1  D0 EE        	BNE @NEXT
+00086Er 1  A9 20        @STOP	LDA #SP		; label is in COMM - ensure filled with spaces
+000870r 1  99 1D 00     @LOOP	STA COMM,Y	; Y still points to next byte to process
+000873r 1  C8           	INY
+000874r 1  C0 06        	CPY #LBLSZ
+000876r 1  D0 F8        	BNE @LOOP
+000878r 1  A9 1D        DOLVAL	LDA #<COMM	; now get value for the label
+00087Ar 1  85 42        	STA STRL
+00087Cr 1  A2 00        	LDX #$00	; select global table (#>COMM)
+00087Er 1  86 43        	STX STRH
+000880r 1  A9 06        	LDA #SYMSZ
+000882r 1  85 2E        	STA RECSIG
+000884r 1  A9 08        	LDA #SYMSZ+2
+000886r 1  85 2D        	STA RECSZ	; size includes additional two bytes for value
+000888r 1  A5 1D        	LDA COMM
+00088Ar 1  C9 2E        	CMP #DOT
+00088Cr 1  F0 11        	BEQ @LOCAL	; local symbol
+00088Er 1  20 rr rr     	JSR SYMSCH
+000891r 1  F0 13        	BEQ @FREF	; if not there, handle as a forward reference
+000893r 1  A0 06        @FOUND	LDY #SYMSZ
+000895r 1  B1 40        	LDA (TBLL),Y	; save value
+000897r 1  85 3E        	STA LVALL
+000899r 1  C8           	INY
+00089Ar 1  B1 40        	LDA (TBLL),Y
+00089Cr 1  85 3F        	STA LVALH
+00089Er 1  60           	RTS
+00089Fr 1               @LOCAL			; locals much the same
+00089Fr 1  A2 03        	LDX #$03	; select local table
+0008A1r 1  20 rr rr     	JSR SYMSCH
+0008A4r 1  D0 ED        	BNE @FOUND	; if not there, handle as a forward reference
+0008A6r 1  A5 58        @FREF	LDA FRFLAG	; set when patching
+0008A8r 1  D0 4F        	BNE SYMERR	; can't add FREFs when patching
+0008AAr 1  20 rr rr     	JSR PCTOLV	; default value	to PC
+0008ADr 1  A5 2A        	LDA FREFTH	; store it in the table
+0008AFr 1  85 51        	STA MISCH
+0008B1r 1  A5 29        	LDA FREFTL	; Calculate storage address
+0008B3r 1  A6 2B        	LDX NFREF
+0008B5r 1  F0 0A        	BEQ @CONT	; no symbols to skip
+0008B7r 1  18           @LOOP	CLC
+0008B8r 1  69 09        	ADC #SYMSZ+3	; skip over existing symbols
+0008BAr 1  90 02        	BCC @SKIP
+0008BCr 1  E6 51        	INC MISCH	; carry bit set - increase high pointer
+0008BEr 1  CA           @SKIP	DEX
+0008BFr 1  D0 F6        	BNE @LOOP
+0008C1r 1  85 50        @CONT	STA MISCL	; Reqd address is now in MISCL,H
+0008C3r 1  E6 2B        	INC NFREF	; Update FREF count
+0008C5r 1  A5 2B        	LDA NFREF
+0008C7r 1  C9 55        	CMP #MAXFRF	; Check for table full
+0008C9r 1  10 32        	BPL OVFERR
+0008CBr 1  A9 1D        	LDA #COMM
+0008CDr 1  85 5A        	STA HADFRF	; non-zero value tells that FREF was encountered
+0008CFr 1  85 52        	STA MISC2L
+0008D1r 1  20 rr rr     	JSR STORE	; Store the symbol
+0008D4r 1  C8           	INY
+0008D5r 1  8A           	TXA		; X is zero after STORE
+0008D6r 1  91 50        	STA (MISCL),Y
+0008D8r 1  60           	RTS		; No error
+0008D9r 1               
+0008D9r 1               ; ****************************************
+0008D9r 1               
+0008D9r 1               PCSYM
+0008D9r 1  20 rr rr     	JSR PCTOLV
+0008DCr 1               ;	JMP STRSYM
+0008DCr 1               
+0008DCr 1               ; ****************************************
+0008DCr 1               
+0008DCr 1               STRSYM			; Store symbol - name at LABEL, value in MISC2L,H
+0008DCr 1  A9 04        	LDA #LABEL
+0008DEr 1  85 52        	STA MISC2L
+0008E0r 1  85 42        	STA STRL
+0008E2r 1  A2 00        	LDX #$00
+0008E4r 1  86 43        	STX STRH
+0008E6r 1  A9 06        	LDA #SYMSZ
+0008E8r 1  85 2E        	STA RECSIG
+0008EAr 1  A5 04        	LDA LABEL	; Global or local?
+0008ECr 1  C9 2E        	CMP #DOT
+0008EEr 1  D0 02        	BNE @SRCH	; Starts with a dot, so local
+0008F0r 1  A2 03        	LDX #$03
+0008F2r 1  20 rr rr     @SRCH	JSR SYMSCH
+0008F5r 1  F0 0B        	BEQ STCONT	; Not there yet, so ok
+0008F7r 1  68           @ERR	PLA
+0008F8r 1  68           	PLA
+0008F9r 1  A0 05        SYMERR	LDY #UNKSYM	; missing symbol error
+0008FBr 1  D0 02        	BNE SBAD
+0008FDr 1               	;LDX #FAIL
+0008FDr 1               	;RTS
+0008FDr 1  A0 04        OVFERR	LDY #OVRFLW	; Symbol table overflow	error
+0008FFr 1  A2 FF        SBAD	LDX #FAIL
+000901r 1  60           	RTS
+000902r 1               STCONT	;LDA #LABEL
+000902r 1  A6 04        	LDX LABEL	; Global or local?
+000904r 1  E0 2E        	CPX #DOT
+000906r 1  F0 17        	BEQ @LSYM	; Starts with a dot, so local
+000908r 1  38           	SEC		; Store symbol in global symbol table
+000909r 1  A5 E9        	LDA GSYMTL	; Make space for next symbol
+00090Br 1  E9 08        	SBC #SYMSZ+2	; skip over existing symbols
+00090Dr 1  B0 02        	BCS @CONTG	; Reqd address is now in GSYMTL,H
+00090Fr 1  C6 EA        @DWNHI	DEC GSYMTH	; carry bit clear - decrease high pointer
+000911r 1  85 E9        @CONTG	STA GSYMTL
+000913r 1  E6 EB        	INC NGSYM	; Update Symbol count - overflow on 256 symbols
+000915r 1  F0 E6        	BEQ OVFERR	; Check for table full
+000917r 1  85 50        	STA MISCL	; put addres into MISCH,L for saving
+000919r 1  A5 EA        	LDA GSYMTH
+00091Br 1  85 51        	STA MISCH
+00091Dr 1  D0 1E        	BNE STORE	; Always branches - symbol tables cannot be on page zero
+00091Fr 1  A5 ED        @LSYM	LDA LSYMTH	; Store symbol in local symbol table
+000921r 1  85 51        	STA MISCH
+000923r 1  A5 EC        	LDA LSYMTL	; Calculate storage address
+000925r 1  A6 EE        	LDX NLSYM
+000927r 1  F0 0A        	BEQ @CONTL	; no symbols to skip
+000929r 1  18           @LOOP	CLC
+00092Ar 1  69 08        	ADC #SYMSZ+2	; skip over existing symbols
+00092Cr 1  90 02        	BCC @SKIP
+00092Er 1  E6 51        	INC MISCH
+000930r 1  CA           @SKIP	DEX
+000931r 1  D0 F6        	BNE @LOOP
+000933r 1  85 50        @CONTL	STA MISCL	; Reqd address is now in MISCL,H
+000935r 1  E6 EE        	INC NLSYM	; Update Symbol count
+000937r 1  A5 EE        	LDA NLSYM
+000939r 1  C9 20        	CMP #MAXSYM	; Check for table full
+00093Br 1  10 C0        	BPL OVFERR
+00093Dr 1  A0 00        STORE	LDY #0		; First store the symbol string
+00093Fr 1  84 53        	STY MISC2H
+000941r 1  A2 06           	LDX #SYMSZ
+000943r 1  B1 52        @MV     LDA (MISC2L),Y 	; move bytes
+000945r 1  91 50                STA (MISCL),Y
+000947r 1  C8                   INY
+000948r 1  CA                   DEX
+000949r 1  D0 F8                BNE @MV
+00094Br 1  A5 3E                LDA LVALL	; Now store the value WORD
+00094Dr 1  91 50        	STA (MISCL),Y
+00094Fr 1  C8           	INY
+000950r 1  A5 3F                LDA LVALH
+000952r 1  91 50        	STA (MISCL),Y
+000954r 1  60           	RTS		; No error
+000955r 1               
+000955r 1               
+000955r 1               ; ****************************************
+000955r 1               
+000955r 1               CONVRT	 		; convert an ASCII string at ARGS,X
+000955r 1               			; of the form $nnnn (1 to 4 digits)
+000955r 1               			; return the result in LVALL,H, and preserves X and Y
+000955r 1               			; uses COMM area for scratch space
+000955r 1  C9 24        	CMP #HEX	; syntax for hex constant
+000957r 1  D0 A6        	BNE SBAD	; syntax error
+000959r 1  84 1E        	STY COMM+1
+00095Br 1  20 rr rr     	JSR NBYTS
+00095Er 1  E0 FF        	CPX #FAIL
+000960r 1  F0 9D        	BEQ SBAD
+000962r 1  85 1D        	STA COMM
+000964r 1  A0 00        	LDY #$00
+000966r 1  84 3F        	STY LVALH
+000968r 1  CA           @BACK	DEX
+000969r 1  CA           	DEX
+00096Ar 1  B5 0F        	LDA ARGS,X
+00096Cr 1  C9 24        	CMP #HEX
+00096Er 1  F0 06        	BEQ @1DIG
+000970r 1  20 rr rr     	JSR BYT2HX
+000973r 1  38           	SEC
+000974r 1  B0 03        	BCS @SKIP
+000976r 1  20 rr rr     @1DIG	JSR AHARGS1	; one digit
+000979r 1  99 3E 00     @SKIP	STA LVALL,Y
+00097Cr 1  C8           	INY
+00097Dr 1  C4 1D        	CPY COMM
+00097Fr 1  D0 E7        	BNE @BACK
+000981r 1  A4 1E        @RET	LDY COMM+1
+000983r 1  60           	RTS
+000984r 1               
+000984r 1               ; ****************************************
+000984r 1               
+000984r 1               SYMSCH			; X = 0 for globals
+000984r 1               			; X = 3 for locals
+000984r 1  B5 E9        	LDA GSYMTL,X	; get global symbol value
+000986r 1  85 40        	STA TBLL
+000988r 1  B5 EA        	LDA GSYMTH,X
+00098Ar 1  85 41        	STA TBLH
+00098Cr 1  B5 EB        	LDA NGSYM,X	; Number of global symbols
+00098Er 1  85 2C        	STA RECNM
+000990r 1  20 rr rr     	JSR SEARCH
+000993r 1  E0 FF        	CPX #FAIL	; Z set if search failed
+000995r 1  60           	RTS		; caller to check
+000996r 1               
+000996r 1               ; ****************************************
+000996r 1               
+000996r 1               FMT2AM			; calculate the addressing given
+000996r 1               			; the format of the arguments;
+000996r 1               			; return format in X, and
+000996r 1               			; location to CHKEXT from in A
+000996r 1               			; $FF		invalid
+000996r 1               			; #ZPG		$nn
+000996r 1               			; #ZPX		$nn,X
+000996r 1               			; #ZPY		$nn,Y
+000996r 1               			; #ABS		$nnnn
+000996r 1               			; #ABX		$nnnn,X
+000996r 1               			; #ABY		$nnnn,Y
+000996r 1               			; #IND		($nnnn)
+000996r 1               			; #IDX		($nn,X)
+000996r 1               			; #IDY		($nn),Y
+000996r 1               			; #INZ		($nn)
+000996r 1               			; #IAX		($nnnn,X)
+000996r 1               ;
+000996r 1               ;	Addressing modes are organised as follows:
+000996r 1               ;
+000996r 1               ;	IMP (0)	ZPG (4) INZ (-) ABS (9) IND (C)
+000996r 1               ;	ACC (1) ZPX (5) INX (7) ABX (A) IAX (D)
+000996r 1               ;	IMM (2) ZPY (6) INY (8) ABY (B) ---
+000996r 1               ;	REL (3) ---	 ---	---	---
+000996r 1               ;
+000996r 1               ;	so algorithm below starts with 4, adds 3 if indirect
+000996r 1               ;	and adds 6 if absolute (i.e. 2 byte address), then adds 1 or 2
+000996r 1               ;	if ,X or ,Y format
+000996r 1               ;
+000996r 1  A2 00        	LDX #$00
+000998r 1  A9 04        	LDA #$04	; start with mode index of 4
+00099Ar 1  B4 0F        	LDY ARGS,X
+00099Cr 1  C0 28        	CPY #OPEN
+00099Er 1  D0 04        	BNE @SKIP
+0009A0r 1  18           	CLC		; add 3 for indirect modes
+0009A1r 1  69 03        	ADC #$03
+0009A3r 1  E8           	INX
+0009A4r 1  48           @SKIP	PHA
+0009A5r 1  20 rr rr     	JSR NBYTS	; count bytes (1 or 2 only)
+0009A8r 1  A8           	TAY		; byte count in Y
+0009A9r 1  CA           	DEX
+0009AAr 1  A5 3C        	LDA CURMNE
+0009ACr 1  C9 21        	CMP #$21	; is it JSR?
+0009AEr 1  F0 04        	BEQ @JSR
+0009B0r 1  C9 23        	CMP #$23	; is it JMP?
+0009B2r 1  D0 01        	BNE @NOJMP
+0009B4r 1               @JSR	;LDY #$2		; force 2 bytes for these two situations
+0009B4r 1  C8           	INY		; following code treats Y = 3 the same as Y = 2
+0009B5r 1  68           @NOJMP	PLA		; mode base back in A
+0009B6r 1  E8           	INX		; check for NBYTS failure
+0009B7r 1  F0 56        	BEQ FERR
+0009B9r 1  88           	DEY
+0009BAr 1  F0 03        	BEQ @1BYT
+0009BCr 1  18           @2BYT	CLC
+0009BDr 1  69 06        	ADC #$06	; add 6 to base index for 2 byte modes
+0009BFr 1  A8           @1BYT	TAY		; mode index now in Y
+0009C0r 1  B5 0F        @CHECK	LDA ARGS,X
+0009C2r 1  F0 04        	BEQ @DONE
+0009C4r 1  C9 20        	CMP #SP
+0009C6r 1  D0 14        	BNE @CONT
+0009C8r 1  A5 0F        @DONE	LDA ARGS
+0009CAr 1  C9 28        	CMP #OPEN	; brackets must match
+0009CCr 1  F0 41        	BEQ FERR
+0009CEr 1  C0 0F        @RET	CPY #$0F
+0009D0r 1  10 3D        	BPL FERR	; no indirect absolute Y mode
+0009D2r 1  C0 07        	CPY #$07
+0009D4r 1  F0 39        	BEQ FERR	; no indirect zero page mode
+0009D6r 1  30 01        	BMI @L1		; 6502 has no INZ mode, so reduce
+0009D8r 1  88           	DEY		; so reduce by ifgreater than 7
+0009D9r 1  98           @L1	TYA
+0009DAr 1  AA           	TAX
+0009DBr 1  60           	RTS
+0009DCr 1  C9 29        @CONT	CMP #CLOSE
+0009DEr 1  D0 0B        	BNE @MORE
+0009E0r 1  A9 20        	LDA #SP
+0009E2r 1  85 0F        	STA ARGS	; erase brackets now they have
+0009E4r 1  E8           	INX
+0009E5r 1  B5 0F        	LDA ARGS,X
+0009E7r 1  C9 2C        	CMP #COMMA
+0009E9r 1  D0 D5        	BNE @CHECK
+0009EBr 1  B5 0F        @MORE	LDA ARGS,X
+0009EDr 1  C9 2C        	CMP #COMMA
+0009EFr 1  D0 1E        	BNE FERR
+0009F1r 1  E8           	INX
+0009F2r 1  B5 0F        	LDA ARGS,X
+0009F4r 1  C9 58        	CMP #'X'
+0009F6r 1  F0 0D        	BEQ @ISX
+0009F8r 1  C9 59        @ISY	CMP #'Y'
+0009FAr 1  D0 13        	BNE FERR
+0009FCr 1  A5 0F        	LDA ARGS
+0009FEr 1  C9 28        	CMP #OPEN
+000A00r 1  F0 0D        	BEQ FERR
+000A02r 1  95 0D        	STA ARGS-2,X	; to avoid ,X check below
+000A04r 1  C8           	INY
+000A05r 1  C8           @ISX	INY
+000A06r 1  B5 0D        	LDA ARGS-2,X
+000A08r 1  C9 29        	CMP #CLOSE
+000A0Ar 1  F0 03        	BEQ FERR
+000A0Cr 1  E8           	INX
+000A0Dr 1  D0 B1        	BNE @CHECK	; always
+000A0Fr 1  A2 FF        FERR	LDX #FAIL	; error message generated upstream
+000A11r 1  60           FRET	RTS
+000A12r 1  A0 00        NBYTS	LDY #$00	; count bytes using Y
+000A14r 1  E8           @LOOP	INX
+000A15r 1  C8           	INY
+000A16r 1  20 rr rr     	JSR AHARGS
+000A19r 1  C9 FF        	CMP #FAIL
+000A1Br 1  D0 F7        	BNE @LOOP
+000A1Dr 1  98           @NEXT	TYA
+000A1Er 1  4A           	LSR		; divide number by 2
+000A1Fr 1  F0 EE        	BEQ FERR	; zero is an error
+000A21r 1  C9 03        	CMP #$03	; 3 or more is an error
+000A23r 1  B0 EA        	BCS FERR
+000A25r 1  60           @RET	RTS
+000A26r 1               
+000A26r 1               ; ****************************************
+000A26r 1               ; *          Utility Routines            *
+000A26r 1               ; ****************************************
+000A26r 1               
+000A26r 1               SEARCH			; TBLL,H has the address of the table to search
+000A26r 1               			; and address of record on successful return
+000A26r 1               			; STRL,H has the address of the search string
+000A26r 1               			; Search through RECNM records
+000A26r 1               			; Each of size RECSZ with RECSIG significant chars
+000A26r 1  A5 2C        	LDA RECNM
+000A28r 1  F0 E5        	BEQ FERR	; empty table
+000A2Ar 1  A2 00        	LDX #$00	; Record number
+000A2Cr 1  A0 FF        @CHK1	LDY #$FF	; Index into entry
+000A2Er 1  C8           @CHMTCH	INY
+000A2Fr 1  C4 2E        	CPY RECSIG	; Have we checked all significant chars?
+000A31r 1  F0 DE        	BEQ FRET	; Yes
+000A33r 1  B1 40        	LDA (TBLL),Y	; Load the bytes to compare
+000A35r 1  D1 42        	CMP (STRL),Y
+000A37r 1  F0 F5        	BEQ @CHMTCH	; Check next if these match
+000A39r 1  E8           	INX		; Else move to next record
+000A3Ar 1  E4 2C        	CPX RECNM
+000A3Cr 1  F0 D1        	BEQ FERR
+000A3Er 1  A5 40        	LDA TBLL	; Update address
+000A40r 1  18           	CLC
+000A41r 1  65 2D        	ADC RECSZ
+000A43r 1  85 40        	STA TBLL
+000A45r 1  90 E5        	BCC @CHK1
+000A47r 1  E6 41        	INC TBLH	; Including high byte if necessary
+000A49r 1  B0 E1        	BCS @CHK1	; will always branch
+000A4Br 1               ;.FAIL	LDX #FAIL	; X = $FF indicates failure
+000A4Br 1               ;.MATCH	RTS		; got it - index is in X, address is in A and TBLL,H
+000A4Br 1               
+000A4Br 1               ; ****************************************
+000A4Br 1               
+000A4Br 1               BYT2HX			; convert the ASCII byte (1 or 2 chars) at offset X in
+000A4Br 1               			; the args field to Hex
+000A4Br 1               			; result in A ($FF for fail)
+000A4Br 1               
+000A4Br 1  20 rr rr     	JSR AHARGS
+000A4Er 1  C9 FF        	CMP #FAIL	; indicates conversion error
+000A50r 1  F0 BD        	BEQ FERR
+000A52r 1  48           	PHA
+000A53r 1  20 rr rr     	JSR AHARGS1
+000A56r 1  CA           	DEX
+000A57r 1  C9 FF        	CMP #FAIL
+000A59r 1  D0 02        	BNE @CONT
+000A5Br 1  68           	PLA		; just ignore 2nd character
+000A5Cr 1  60           	RTS
+000A5Dr 1  85 44        @CONT	STA SCRTCH
+000A5Fr 1  68           	PLA
+000A60r 1  0A           	ASL		; shift
+000A61r 1  0A           	ASL
+000A62r 1  0A           	ASL
+000A63r 1  0A           	ASL
+000A64r 1  65 44        	ADC SCRTCH
+000A66r 1  60           	RTS
+000A67r 1               
+000A67r 1               ; ****************************************
+000A67r 1               
+000A67r 1  E8           AHARGS1	INX		; caller needs to DEX
+000A68r 1  B5 0F        AHARGS	LDA ARGS,X
+000A6Ar 1               ASC2HX			; convert ASCII code in A to a HEX digit
+000A6Ar 1  49 30            	EOR #$30
+000A6Cr 1  C9 0A        	CMP #$0A
+000A6Er 1  90 08        	BCC @VALID
+000A70r 1  69 88        	ADC #$88        ; $89 - CLC
+000A72r 1  C9 FA        	CMP #$FA
+000A74r 1  90 03        	BCC @ERR
+000A76r 1  29 0F        	AND #$0F
+000A78r 1  60           @VALID	RTS
+000A79r 1  A9 FF        @ERR	LDA #FAIL	; this value can never be from a single digit,
+000A7Br 1  60           	RTS		; so ok to indicate error
+000A7Cr 1               
+000A7Cr 1               ; ****************************************
+000A7Cr 1               
+000A7Cr 1               HX2ASC			; convert a byte in A into two ASCII characters
+000A7Cr 1               			; store in ARGS,Y and ARGS+1,Y
+000A7Cr 1  48           	PHA 		; 1st byte.
+000A7Dr 1  20 rr rr     	JSR LSR4	; slower, but saves a byte and not too crucial
+000A80r 1  20 rr rr     	JSR DO1DIG
+000A83r 1  68           	PLA
+000A84r 1  29 0F        DO1DIG	AND #$0F	; Print 1 hex digit
+000A86r 1  09 30        	ORA #$30
+000A88r 1  C9 3A        	CMP #$3A
+000A8Ar 1  90 02        	BCC @DONE
+000A8Cr 1  69 06        	ADC #$06
+000A8Er 1  99 0F 00     @DONE	STA ARGS,Y
+000A91r 1  C8           	INY
+000A92r 1  60           	RTS
+000A93r 1               
+000A93r 1               ; ****************************************
+000A93r 1               
+000A93r 1               EXPMNE			; copy the 2 chars at R/LMNETB,X
+000A93r 1               			; into LMNE and RMNE, and expand
+000A93r 1               			; into 3 chars at MNE to MNE+2
+000A93r 1  BD rr rr     	LDA LMNETB,X
+000A96r 1  85 56        	STA LMNE
+000A98r 1  BD rr rr     	LDA RMNETB,X
+000A9Br 1  85 57        	STA RMNE
+000A9Dr 1  A2 00        	LDX #$00
+000A9Fr 1  A9 00        @NEXT	LDA #$00
+000AA1r 1  A0 05        	LDY #$05
+000AA3r 1  06 57        @LOOP	ASL RMNE
+000AA5r 1  26 56        	ROL LMNE
+000AA7r 1  2A           	ROL
+000AA8r 1  88           	DEY
+000AA9r 1  D0 F8        	BNE @LOOP
+000AABr 1  69 40        	ADC #'A'-1
+000AADr 1  95 0B        	STA MNE,X
+000AAFr 1  A4 5B        	LDY PRFLAG
+000AB1r 1  F0 03        	BEQ @SKIP
+000AB3r 1  20 EF FF     	JSR OUTCH	; print the mnemonic as well
+000AB6r 1  E8           @SKIP	INX
+000AB7r 1  E0 03        	CPX #$03
+000AB9r 1  D0 E4        	BNE @NEXT
+000ABBr 1  60           	RTS
+000ABCr 1               
+000ABCr 1               ; ****************************************
+000ABCr 1               ;      		DISASSEMBLER
+000ABCr 1               ; Adapted from code in a Dr Dobbs article
+000ABCr 1               ; by Steve Wozniak and Allen Baum (Sep '76)
+000ABCr 1               ; ****************************************
+000ABCr 1               
+000ABCr 1               DISASM
+000ABCr 1  20 rr rr     	JSR ADDARG
+000ABFr 1               	;BEQ .DODIS
+000ABFr 1  F0 03        	BEQ DSMBL
+000AC1r 1  20 rr rr     @COPY	JSR LVTOPC
+000AC4r 1               ;.DODIS	JMP DSMBL
+000AC4r 1               ; fall through
+000AC4r 1               
+000AC4r 1               ; ****************************************
+000AC4r 1               
+000AC4r 1               DSMBL
+000AC4r 1               	;LDA #$13	; Count for 20 instruction dsmbly
+000AC4r 1               	;STA COUNT
+000AC4r 1  20 rr rr     @DSMBL2	JSR INSTDSP	; Disassemble and display instr.
+000AC7r 1  20 rr rr     	JSR PCADJ
+000ACAr 1  85 F5        	STA PCL		; Update PCL,H to next instr.
+000ACCr 1  84 F6        	STY PCH
+000ACEr 1               	;DEC COUNT	; Done first 19 instrs
+000ACEr 1               	;BNE .DSMBL2	; * Yes, loop.  Else DSMBL 20th
+000ACEr 1               
+000ACEr 1               	.if APPLE1
+000ACEr 1  AD 11 D0     	LDA	KBDRDY	; any key stops the disassembly
+000AD1r 1  10 F1        	BPL	@DSMBL2
+000AD3r 1  AD 10 D0     	LDA	KBD
+000AD6r 1               	.else
+000AD6r 1                      LDA     ACIAStatus
+000AD6r 1                       AND     #1
+000AD6r 1                       BEQ     @DSMBL2
+000AD6r 1                       LDA     ACIAData
+000AD6r 1               	.endif
+000AD6r 1               
+000AD6r 1               
+000AD6r 1  20 rr rr     INSTDSP	JSR PRPC	; Print PCL,H
+000AD9r 1  A1 F5        	LDA (PCL,X)	; Get op code
+000ADBr 1  A8           	TAY
+000ADCr 1  4A           	LSR   		; * Even/odd test
+000ADDr 1  90 09        	BCC @IEVEN
+000ADFr 1  6A           	ROR  		; * Test B1
+000AE0r 1  B0 14        	BCS @ERR	; XXXXXX11 instr invalid
+000AE2r 1  C9 A2        	CMP #$A2
+000AE4r 1  F0 10        	BEQ @ERR	; 10001001 instr invalid
+000AE6r 1  29 87        	AND #$87	; Mask 3 bits for address mode
+000AE8r 1               	;ORA #$80	; * add indexing offset
+000AE8r 1  4A           @IEVEN	LSR   		; * LSB into carry for
+000AE9r 1  AA           	TAX   		; Left/right test below
+000AEAr 1  BD rr rr     	LDA MODE,X	; Index into address mode table
+000AEDr 1  90 03        	BCC @RTMODE	; If carry set use LSD for
+000AEFr 1  20 rr rr     	JSR LSR4
+000AF2r 1               	;LSR   		; * print format index
+000AF2r 1               	;LSR
+000AF2r 1               	;LSR   		; If carry clear use MSD
+000AF2r 1               	;LSR
+000AF2r 1  29 0F        @RTMODE	AND #$0F	; Mask for 4-bit index
+000AF4r 1  D0 04        	BNE @GETFMT	; $0 for invalid opcodes
+000AF6r 1  A0 80        @ERR	LDY #$80	; Substitute $80 for invalid op,
+000AF8r 1  A9 00        	LDA #$00	; set print format index to 0
+000AFAr 1  AA           @GETFMT	TAX
+000AFBr 1  BD rr rr     	LDA MODE2,X	; Index into print format table
+000AFEr 1  85 29        	STA FORMAT	; Save for address field format
+000B00r 1  29 03        	AND #$03	; Mask 2-bit length.  0=1-byte
+000B02r 1  85 2A        	STA LENGTH	; *  1=2-byte, 2=3 byte
+000B04r 1  98           	TYA   		; * op code
+000B05r 1  20 rr rr     	JSR GETMNE
+000B08r 1  A0 00        	LDY #$00
+000B0Ar 1  48           	PHA   		; Save mnemonic table index
+000B0Br 1  B1 F5        @PROP	LDA (PCL),Y
+000B0Dr 1  20 DC FF     	JSR OUTHEX
+000B10r 1  A2 01        	LDX #$01
+000B12r 1  20 rr rr     @PROPBL	JSR PRBL2
+000B15r 1  C4 2A        	CPY LENGTH	; Print instr (1 to 3 bytes)
+000B17r 1  C8           	INY   		; *  in a 12-character field
+000B18r 1  90 F1        	BCC @PROP
+000B1Ar 1  A2 03        	LDX #$03	; char count for mnemonic print
+000B1Cr 1  86 5B        	STX PRFLAG	; So EXPMNE prints the mnemonic
+000B1Er 1  C0 04        	CPY #$04
+000B20r 1  90 F0        	BCC @PROPBL
+000B22r 1  68           	PLA   		; Recover mnemonic index
+000B23r 1  AA           	TAX
+000B24r 1  20 rr rr     	JSR EXPMNE
+000B27r 1  20 rr rr     	JSR PRBLNK	; Output 3 blanks
+000B2Ar 1  A4 2A        	LDY LENGTH
+000B2Cr 1  A2 06        	LDX #$06	; Count for 6 print format bits
+000B2Er 1  E0 03        @PPADR1	CPX #$03
+000B30r 1  F0 1E        	BEQ @PPADR5	; If X=3 then print address val
+000B32r 1  06 29        @PPADR2	ASL FORMAT	; Test next print format bit
+000B34r 1  90 0E        	BCC @PPADR3	; If 0 don't print
+000B36r 1  BD rr rr     	LDA CHAR1-1,X	; *  corresponding chars
+000B39r 1  20 EF FF     	JSR OUTCH	; Output 1 or 2 chars
+000B3Cr 1  BD rr rr     	LDA CHAR2-1,X	; *  (If char from char2 is 0,
+000B3Fr 1  F0 03        	BEQ @PPADR3	; *   don't output it)
+000B41r 1  20 EF FF     	JSR OUTCH
+000B44r 1  CA           @PPADR3	DEX
+000B45r 1  D0 E7        	BNE @PPADR1
+000B47r 1  86 5B        	STX PRFLAG	; reset flag to 0
+000B49r 1  60           	RTS  		; Return if done 6 format bits
+000B4Ar 1  88           @PPADR4	DEY
+000B4Br 1  30 E5        	BMI @PPADR2
+000B4Dr 1  20 DC FF     	JSR OUTHEX	; Output 1- or 2-byte address
+000B50r 1  A5 29        @PPADR5	LDA FORMAT
+000B52r 1  C9 E8        	CMP #$E8	; Handle rel addressing mode
+000B54r 1  B1 F5        	LDA (PCL),Y	; Special print target adr
+000B56r 1  90 F2        	BCC @PPADR4	; *  (not displacement)
+000B58r 1  20 rr rr     @RELADR	JSR PCADJ3	; PCL,H + DISPL + 1 to A,Y
+000B5Br 1  AA           	TAX
+000B5Cr 1  E8           	INX
+000B5Dr 1  D0 01        	BNE PRNTYX	; *     +1 to X,Y
+000B5Fr 1  C8           	INY
+000B60r 1  98           PRNTYX	TYA
+000B61r 1  20 DC FF     PRNTAX	JSR OUTHEX	; Print target adr of branch
+000B64r 1  8A           PRNTX	TXA   		; *  and return
+000B65r 1  4C DC FF     	JMP OUTHEX
+000B68r 1  20 rr rr     PRPC	JSR CRLF	; Output carriage return
+000B6Br 1  A5 F6        	LDA PCH
+000B6Dr 1  A6 F5        	LDX PCL
+000B6Fr 1  20 rr rr     	JSR PRNTAX	; Output PCL and PCH
+000B72r 1  A2 03        PRBLNK	LDX #$03	; Blank count
+000B74r 1  20 rr rr     PRBL2	JSR OUTSP	; Output a blank
+000B77r 1  CA           	DEX
+000B78r 1  D0 FA        	BNE PRBL2	; Loop until count = 0
+000B7Ar 1  60           	RTS
+000B7Br 1  38           PCADJ	SEC
+000B7Cr 1  A5 2A        PCADJ2	LDA LENGTH	; 0=1-byte, 1=2-byte, 2=3-byte
+000B7Er 1  A4 F6        PCADJ3	LDY PCH
+000B80r 1  AA           	TAX   		; * test displ sign (for rel
+000B81r 1  10 01        	BPL @PCADJ4	; *  branch).  Extend neg
+000B83r 1  88           	DEY   		; *  by decrementing PCH
+000B84r 1  65 F5        @PCADJ4	ADC PCL
+000B86r 1  90 01        	BCC @RTS		; PCL+LENGTH (or displ) + 1 to A
+000B88r 1  C8           	INY   		; *  carry into Y (PCH)
+000B89r 1  60           @RTS	RTS
+000B8Ar 1               
+000B8Ar 1               GETMNE			; get mnemonic index for opcode in A
+000B8Ar 1               			; on completion, A holds the index
+000B8Ar 1               			; into the mnemonic table
+000B8Ar 1  85 54        	STA TEMP1	; will need it later
+000B8Cr 1  29 8F        	AND #$8F
+000B8Er 1  C9 8A        	CMP #$8A
+000B90r 1  F0 43        	BEQ CAT3
+000B92r 1  0A           	ASL
+000B93r 1  C9 10        	CMP #$10
+000B95r 1  F0 37        	BEQ CAT2
+000B97r 1  A5 54        	LDA TEMP1	; ? ABCD EFGH - thanks bogax, www.6502.org/forum
+000B99r 1  0A           	ASL		; A BCDE FGH0
+000B9Ar 1  69 80        	ADC #$80	; B ?CDE FGHA
+000B9Cr 1  2A           	ROL		; ? CDEF GHAB
+000B9Dr 1  0A           	ASL		; C DEFG HAB0
+000B9Er 1  29 1F        	AND #$1F	; C 000G HAB0
+000BA0r 1  69 20        	ADC #$20	; 0 001G HABC
+000BA2r 1  48           	PHA
+000BA3r 1  A5 54        	LDA TEMP1	; get the opcode back
+000BA5r 1  29 9F        	AND #$9F
+000BA7r 1  F0 1B        	BEQ CAT1
+000BA9r 1  0A           	ASL
+000BAAr 1  C9 20        	CMP #$20
+000BACr 1  F0 10        	BEQ CAT4
+000BAEr 1  29 06        	AND #$06
+000BB0r 1  D0 2F        	BNE CAT67
+000BB2r 1               CAT5			; remaining nnnX XX00 codes
+000BB2r 1  68           	PLA
+000BB3r 1  29 07        	AND #$07	; just low 3 bits
+000BB5r 1  C9 03        	CMP #$03
+000BB7r 1  10 02        	BPL @L3
+000BB9r 1  69 02        	ADC #$02	; correction for 21 and 22
+000BBBr 1  69 1F        @L3	ADC #$1F	; and add 20
+000BBDr 1  60           	RTS
+000BBEr 1               CAT4			; Branch instructions - nnn1 0000
+000BBEr 1  68           	PLA
+000BBFr 1  29 07        	AND #$07	; just low 3 bits
+000BC1r 1  69 18        	ADC #$18	; and add 19 (carry is set)
+000BC3r 1  60           	RTS
+000BC4r 1               CAT1			; 0nn0 0000 - BRK, JSR, RTI, RTS
+000BC4r 1  68           	PLA
+000BC5r 1  AA           	TAX
+000BC6r 1  BD rr rr     	LDA MNEDAT-$20,X
+000BC9r 1  60           	RTS
+000BCAr 1  16 21 17 18  MNEDAT	.byte $16, $21, $17, $18
+000BCEr 1               CAT2			; nnnn 1000 - lots of no-arg mnemonics
+000BCEr 1  A5 54        	LDA TEMP1
+000BD0r 1  4A           LSR4	LSR		; need high 4 bits
+000BD1r 1  4A           	LSR
+000BD2r 1  4A           	LSR
+000BD3r 1  4A           	LSR
+000BD4r 1  60           	RTS
+000BD5r 1               CAT3			; 1nnn 1010 - TXA,TXS,TAX,TSX,DEX,-,NOP,-
+000BD5r 1  20 rr rr     	JSR CAT2	; need high 4 bits
+000BD8r 1  C9 0E        	CMP #$0E
+000BDAr 1  D0 02        	BNE @L2
+000BDCr 1  69 FD        	ADC #$FD
+000BDEr 1  69 08        @L2	ADC #$08	; then add 8
+000BE0r 1  60           	RTS
+000BE1r 1               CAT67			; gets the index for categories 6 and 7
+000BE1r 1  68           	PLA		; i.e. nnnX XX01 and nnnX XX10 ($28-$2F, $30-$37)
+000BE2r 1  60           	RTS		; it's already done
+000BE3r 1               
+000BE3r 1               ; Data and related constants
+000BE3r 1               
+000BE3r 1               MODES			; Addressing mode constants
+000BE3r 1               IMP = $00
+000BE3r 1               ACC = $01
+000BE3r 1               IMM = $02		; #$nn or #'<char>' or #LABEL
+000BE3r 1               REL = $03		; *+nn or LABEL
+000BE3r 1               ZPG = $04		; $nn or LABEL
+000BE3r 1               ZPX = $05		; $nn,X or LABEL,X
+000BE3r 1               ZPY = $06		; $nn,Y or LABEL,Y
+000BE3r 1               IDX = $07		; ($nn,X) or (LABEL,X)
+000BE3r 1               IDY = $08		; ($nn),Y or (LABEL),Y
+000BE3r 1               ABS = $09		; $nnnn or LABEL
+000BE3r 1               ABX = $0A		; $nnnn,X or LABEL,X
+000BE3r 1               ABY = $0B		; $nnnn or LABEL
+000BE3r 1               IND = $0C		; ($nnnn) or (LABEL)
+000BE3r 1               
+000BE3r 1               NUMMN 	=$38		; number of mnemonics
+000BE3r 1               
+000BE3r 1               ; Tables
+000BE3r 1               
+000BE3r 1               LMNETB
+000BE3r 1               
+000BE3r 1  82           	.byte $82	; PHP
+000BE4r 1  1B           	.byte $1B	; CLC
+000BE5r 1  83           	.byte $83	; PLP
+000BE6r 1  99           	.byte $99	; SEC
+000BE7r 1  82           	.byte $82	; PHA
+000BE8r 1  1B           	.byte $1B	; CLI
+000BE9r 1  83           	.byte $83	; PLA
+000BEAr 1  99           	.byte $99	; SEI
+000BEBr 1  21           	.byte $21	; DEY
+000BECr 1  A6           	.byte $A6	; TYA
+000BEDr 1  A0           	.byte $A0	; TAY
+000BEEr 1  1B           	.byte $1B	; CLV
+000BEFr 1  4B           	.byte $4B	; INY
+000BF0r 1  1B           	.byte $1B	; CLD
+000BF1r 1  4B           	.byte $4B	; INX
+000BF2r 1  99           	.byte $99	; SED
+000BF3r 1  A6           	.byte $A6	; TXA
+000BF4r 1  A6           	.byte $A6	; TXS
+000BF5r 1  A0           	.byte $A0	; TAX
+000BF6r 1  A4           	.byte $A4	; TSX
+000BF7r 1  21           	.byte $21	; DEX
+000BF8r 1  73           	.byte $73	; NOP
+000BF9r 1  14           	.byte $14	; BRK
+000BFAr 1  95           	.byte $95	; RTI
+000BFBr 1  95           	.byte $95	; RTS
+000BFCr 1  14           	.byte $14	; BPL
+000BFDr 1  13           	.byte $13	; BMI
+000BFEr 1  15           	.byte $15	; BVC
+000BFFr 1  15           	.byte $15	; BVS
+000C00r 1  10           	.byte $10	; BCC
+000C01r 1  10           	.byte $10	; BCS
+000C02r 1  13           	.byte $13	; BNE
+000C03r 1  11           	.byte $11	; BEQ
+000C04r 1  54           	.byte $54	; JSR
+000C05r 1  12           	.byte $12	; BIT
+000C06r 1  53           	.byte $53	; JMP
+000C07r 1  9D           	.byte $9D	; STY
+000C08r 1  61           	.byte $61	; LDY
+000C09r 1  1C           	.byte $1C	; CPY
+000C0Ar 1  1C           	.byte $1C	; CPX
+000C0Br 1  7C           	.byte $7C	; ORA
+000C0Cr 1  0B           	.byte $0B	; AND
+000C0Dr 1  2B           	.byte $2B	; EOR
+000C0Er 1  09           	.byte $09	; ADC
+000C0Fr 1  9D           	.byte $9D	; STA
+000C10r 1  61           	.byte $61	; LDA
+000C11r 1  1B           	.byte $1B	; CMP
+000C12r 1  98           	.byte $98	; SBC
+000C13r 1  0C           	.byte $0C	; ASL
+000C14r 1  93           	.byte $93	; ROL
+000C15r 1  64           	.byte $64	; LSR
+000C16r 1  93           	.byte $93	; ROR
+000C17r 1  9D           	.byte $9D	; STX
+000C18r 1  61           	.byte $61	; LDX
+000C19r 1  21           	.byte $21	; DEC
+000C1Ar 1  4B           	.byte $4B	; INC
+000C1Br 1               
+000C1Br 1               
+000C1Br 1               RMNETB
+000C1Br 1  20           	.byte $20	; PHP
+000C1Cr 1  06           	.byte $06	; CLC
+000C1Dr 1  20           	.byte $20	; PLP
+000C1Er 1  46           	.byte $46	; SEC
+000C1Fr 1  02           	.byte $02	; PHA
+000C20r 1  12           	.byte $12	; CLI
+000C21r 1  02           	.byte $02	; PLA
+000C22r 1  52           	.byte $52	; SEI
+000C23r 1  72           	.byte $72	; DEY
+000C24r 1  42           	.byte $42	; TYA
+000C25r 1  72           	.byte $72	; TAY
+000C26r 1  2C           	.byte $2C	; CLV
+000C27r 1  B2           	.byte $B2	; INY
+000C28r 1  08           	.byte $08	; CLD
+000C29r 1  B0           	.byte $B0	; INX
+000C2Ar 1  48           	.byte $48	; SED
+000C2Br 1  02           	.byte $02	; TXA
+000C2Cr 1  26           	.byte $26	; TXS
+000C2Dr 1  70           	.byte $70	; TAX
+000C2Er 1  F0           	.byte $F0	; TSX
+000C2Fr 1  70           	.byte $70	; DEX
+000C30r 1  E0           	.byte $E0	; NOP
+000C31r 1  96           	.byte $96	; BRK
+000C32r 1  12           	.byte $12	; RTI
+000C33r 1  26           	.byte $26	; RTS
+000C34r 1  18           	.byte $18	; BPL
+000C35r 1  52           	.byte $52	; BMI
+000C36r 1  86           	.byte $86	; BVC
+000C37r 1  A6           	.byte $A6	; BVS
+000C38r 1  C6           	.byte $C6	; BCC
+000C39r 1  E6           	.byte $E6	; BCS
+000C3Ar 1  8A           	.byte $8A	; BNE
+000C3Br 1  62           	.byte $62	; BEQ
+000C3Cr 1  E4           	.byte $E4	; JSR
+000C3Dr 1  68           	.byte $68	; BIT
+000C3Er 1  60           	.byte $60	; JMP
+000C3Fr 1  32           	.byte $32	; STY
+000C40r 1  32           	.byte $32	; LDY
+000C41r 1  32           	.byte $32	; CPY
+000C42r 1  30           	.byte $30	; CPX
+000C43r 1  82           	.byte $82	; ORA
+000C44r 1  88           	.byte $88	; AND
+000C45r 1  E4           	.byte $E4	; EOR
+000C46r 1  06           	.byte $06	; ADC
+000C47r 1  02           	.byte $02	; STA
+000C48r 1  02           	.byte $02	; LDA
+000C49r 1  60           	.byte $60	; CMP
+000C4Ar 1  86           	.byte $86	; SBC
+000C4Br 1  D8           	.byte $D8	; ASL
+000C4Cr 1  D8           	.byte $D8	; ROL
+000C4Dr 1  E4           	.byte $E4	; LSR
+000C4Er 1  E4           	.byte $E4	; ROR
+000C4Fr 1  30           	.byte $30	; STX
+000C50r 1  30           	.byte $30	; LDX
+000C51r 1  46           	.byte $46	; DEC
+000C52r 1  86           	.byte $86	; INC
+000C53r 1               
+000C53r 1               MIN			; Minimum legal value for MNE for each mode.
+000C53r 1  00 30 25 19  	.byte $00, $30, $25, $19, $24
+000C57r 1  24           
+000C58r 1  28 34 28 28  	.byte $28, $34, $28, $28, $21, $28
+000C5Cr 1  21 28        
+000C5Er 1  28 23        	.byte $28, $23
+000C60r 1               MAX			; Maximum +1 legal value of MNE for each mode.
+000C60r 1  19 34 30 21  	.byte $18+1, $33+1, $2F+1, $20+1, $37+1
+000C64r 1  38           
+000C65r 1  34 36 30 30  	.byte $33+1, $35+1, $2F+1, $2F+1, $37+1, $33+1
+000C69r 1  38 34        
+000C6Br 1  30 24        	.byte $2F+1, $23+1
+000C6Dr 1               BASE			; Base value for each opcode
+000C6Dr 1  08 18 28 38  	.byte $08, $18, $28, $38
+000C71r 1  48 58 68 78  	.byte $48, $58, $68, $78
+000C75r 1  88 98 A8 B8  	.byte $88, $98, $A8, $B8
+000C79r 1  C8 D8 E8 F8  	.byte $C8, $D8, $E8, $F8
+000C7Dr 1  8A 9A AA BA  	.byte $8A, $9A, $AA, $BA
+000C81r 1  CA EA 00 40  	.byte $CA, $EA, $00, $40
+000C85r 1  60 10 30 50  	.byte $60, $10, $30, $50
+000C89r 1  70 90 B0 D0  	.byte $70, $90, $B0, $D0
+000C8Dr 1  F0 14 20 40  	.byte $F0, $14, $20, $40
+000C91r 1  80 A0 C0 E0  	.byte $80, $A0, $C0, $E0
+000C95r 1  01 21 41 61  	.byte $01, $21, $41, $61
+000C99r 1  81 A1 C1 E1  	.byte $81, $A1, $C1, $E1
+000C9Dr 1  02 22 42 62  	.byte $02, $22, $42, $62
+000CA1r 1  82 A2 C2 E2  	.byte $82, $A2, $C2, $E2
+000CA5r 1               OFFSET			; Default offset values for each mode,
+000CA5r 1               			; added to BASE to get Opcode
+000CA5r 1  00 08 00 00  	.byte $00, $08, $00, $00, $04
+000CA9r 1  04           
+000CAAr 1  14 14 00 10  	.byte $14, $14, $00, $10, $0C, $1C
+000CAEr 1  0C 1C        
+000CB0r 1  18 2C        	.byte $18, $2C
+000CB2r 1               
+000CB2r 1               ; offset adjustments for the mnemonic exceptions
+000CB2r 1               ADJABY  =$04		;
+000CB2r 1               ADJIMM  =$08		;
+000CB2r 1               
+000CB2r 1               ; disassembler data
+000CB2r 1               
+000CB2r 1               ; XXXXXXZ0 instrs
+000CB2r 1               ; * Z=0, left half-byte
+000CB2r 1               ; * Z=1, right half-byte
+000CB2r 1  04 20 54 30  MODE	.byte $04, $20, $54, $30, $0D
+000CB6r 1  0D           
+000CB7r 1  80 04 90 03  	.byte $80, $04, $90, $03, $22
+000CBBr 1  22           
+000CBCr 1  54 33 0D 80  	.byte $54, $33, $0D, $80, $04
+000CC0r 1  04           
+000CC1r 1  90 04 20 54  	.byte $90, $04, $20, $54, $33
+000CC5r 1  33           
+000CC6r 1  0D 80 04 90  	.byte $0D, $80, $04, $90, $04
+000CCAr 1  04           
+000CCBr 1  20 54 3B 0D  	.byte $20, $54, $3B, $0D, $80
+000CCFr 1  80           
+000CD0r 1  04 90 00 22  	.byte $04, $90, $00, $22, $44
+000CD4r 1  44           
+000CD5r 1  33 0D C8 44  	.byte $33, $0D, $C8, $44, $00
+000CD9r 1  00           
+000CDAr 1  11 22 44 33  	.byte $11, $22, $44, $33, $0D
+000CDEr 1  0D           
+000CDFr 1  C8 44 A9 01  	.byte $C8, $44, $A9, $01, $22
+000CE3r 1  22           
+000CE4r 1  44 33 0D 80  	.byte $44, $33, $0D, $80, $04
+000CE8r 1  04           
+000CE9r 1  90 01 22 44  	.byte $90, $01, $22, $44, $33
+000CEDr 1  33           
+000CEEr 1  0D 80 04 90  	.byte $0D, $80, $04, $90
+000CF2r 1               ; YYXXXZ01 instrs
+000CF2r 1  26 31 87 9A  	.byte $26, $31, $87, $9A
+000CF6r 1               
+000CF6r 1  00           MODE2	.byte $00	; ERR
+000CF7r 1  21           	.byte $21	; IMM
+000CF8r 1  81           	.byte $81	; Z-PAG
+000CF9r 1  82           	.byte $82	; ABS
+000CFAr 1  00           	.byte $00	; IMPL
+000CFBr 1  00           	.byte $00	; ACC
+000CFCr 1  59           	.byte $59	; (Z-PAG,X)
+000CFDr 1  4D           	.byte $4D	; (Z-PAG),Y
+000CFEr 1  91           	.byte $91	; Z-PAG,X
+000CFFr 1  92           	.byte $92	; ABS,X
+000D00r 1  86           	.byte $86	; ABS,Y
+000D01r 1  4A           	.byte $4A	; (ABS)
+000D02r 1  85           	.byte $85	; Z-PAG,Y
+000D03r 1  9D           	.byte $9D	; REL
+000D04r 1  2C           CHAR1	.byte ','
+000D05r 1  29           	.byte ')'
+000D06r 1  2C           	.byte ','
+000D07r 1  23           	.byte '#'
+000D08r 1  28           	.byte '('
+000D09r 1  24           	.byte '$'
+000D0Ar 1  59           CHAR2	.byte 'Y'
+000D0Br 1  00           	.byte $00
+000D0Cr 1  58           	.byte 'X'
+000D0Dr 1  24           	.byte '$'
+000D0Er 1  24           	.byte '$'
+000D0Fr 1  00           	.byte $00
+000D10r 1               
+000D10r 1               ; Special case mnemonics
+000D10r 1               SPCNT	= $06		; duplicate some checks so I can use the same loop above
+000D10r 1               ; Opcodes
+000D10r 1  22 24 25 35  SPINC1	.byte $22, $24, $25, $35, $36, $37
+000D14r 1  36 37        
+000D16r 1               ; 1st address mode to check
+000D16r 1  04 05 05 02  SPINC2	.byte $04, $05, $05, $02, $05, $05
+000D1Ar 1  05 05        
+000D1Cr 1               ; 2nd address mode to check
+000D1Cr 1  04 05 0A 0B  SPINC3	.byte $04, $05, $0A, $0B, $0A, $0A
+000D20r 1  0A 0A        
+000D22r 1               
+000D22r 1               ; commands
+000D22r 1               
+000D22r 1               NUMCMD	=$0D
+000D22r 1  4E 4C 58 45  CMDS	.byte "NLXEMRDI!$AVP"
+000D26r 1  4D 52 44 49  
+000D2Ar 1  21 24 41 56  
+000D2Fr 1               
+000D2Fr 1               N1 = NEW-1
+000D2Fr 1               L1 = LIST-1
+000D2Fr 1               D1 = DELETE-1
+000D2Fr 1               E1 = EDIT-1
+000D2Fr 1               M1 = MEM-1
+000D2Fr 1               R1 = RUN-1
+000D2Fr 1               DIS1 = DISASM-1
+000D2Fr 1               I1 = INSERT-1
+000D2Fr 1               GL1 = GETLINE-1
+000D2Fr 1               MON1 = MONTOR-1
+000D2Fr 1               A1 = ASSEM-1
+000D2Fr 1               V1 = VALUE-1
+000D2Fr 1               P1 = PANIC-1
+000D2Fr 1               
+000D2Fr 1  rr           CMDH	.byte	>N1
+000D30r 1  rr           	.byte	>L1
+000D31r 1  rr           	.byte	>D1
+000D32r 1  rr           	.byte	>E1
+000D33r 1  rr           	.byte	>M1
+000D34r 1  rr           	.byte	>R1
+000D35r 1  rr           	.byte	>DIS1
+000D36r 1  rr           	.byte	>I1
+000D37r 1  FF           	.byte	>GL1
+000D38r 1  FF           	.byte	>MON1
+000D39r 1  rr           	.byte	>A1
+000D3Ar 1  rr           	.byte	>V1
+000D3Br 1  rr           	.byte	>P1
+000D3Cr 1               
+000D3Cr 1  rr           CMDL	.byte	<N1
+000D3Dr 1  rr           	.byte	<L1
+000D3Er 1  rr           	.byte	<D1
+000D3Fr 1  rr           	.byte	<E1
+000D40r 1  rr           	.byte	<M1
+000D41r 1  rr           	.byte	<R1
+000D42r 1  rr           	.byte	<DIS1
+000D43r 1  rr           	.byte	<I1
+000D44r 1  11           	.byte	<GL1
+000D45r 1  05           	.byte	<MON1
+000D46r 1  rr           	.byte	<A1
+000D47r 1  rr           	.byte	<V1
+000D48r 1  rr           	.byte	<P1
+000D49r 1               
+000D49r 1               ; Assembler directives - all entered with a leading '.'
+000D49r 1               
+000D49r 1               BYTE 	='B'		; bytes
+000D49r 1               WORD	='W'		; word
+000D49r 1               STR	='S'		; string
+000D49r 1               EQU	='='		; equate
+000D49r 1               MOD	='M'		; start address for subsequent module
+000D49r 1               
+000D49r 1               NUMDIR	=$05
+000D49r 1  42 57 53 3D  DIRS	.byte "BWS=M"
+000D4Dr 1  4D           
+000D4Er 1               
+000D4Er 1               ; Errors
+000D4Er 1               
+000D4Er 1               UNKERR	=$00
+000D4Er 1               INVMNE	=$01		; Invalid mnemonic
+000D4Er 1               ILLADM	=$02		; Illegal addressing mode
+000D4Er 1               SYNTAX	=$03		; Syntax error
+000D4Er 1               OVRFLW	=$04		; Symbol table overflow
+000D4Er 1               UNKSYM	=$05		; Unknown or duplicate symbol error
+000D4Er 1               MAXERR	=$06
+000D4Er 1               
+000D4Er 1               EMSGSZ	=$03		; The size of the error message strings
+000D4Er 1               ERPRSZ	=$05		; The size of the error prefix string
+000D4Er 1  20 3A 52 52  ERRPRE	.byte " :RRE"
+000D52r 1  45           
+000D53r 1               ERRMSG
+000D53r 1               	.if UNK_ERR_CHECK
+000D53r 1               	.byte "UNK"
+000D53r 1               	.endif
+000D53r 1  4D 4E 45     	.byte "MNE"
+000D56r 1  41 44 44     	.byte "ADD"
+000D59r 1  53 59 4E     	.byte "SYN"
+000D5Cr 1  4F 56 46     	.byte "OVF"
+000D5Fr 1  53 59 4D     	.byte "SYM"
+000D62r 1               
+000D62r 1               MSGSZ = $1B
+000D62r 1  4E 45 53 53  MSG	.byte "NESSEW NEK YB 3.1 REDASURK",CR
+000D66r 1  45 57 20 4E  
+000D6Ar 1  45 4B 20 59  
+000D7Dr 1               
+000D7Dr 1               	.if MINIMONITOR
+000D7Dr 1               ; ****************************************
+000D7Dr 1               ;      		MINIMONITOR
+000D7Dr 1               ; A simple monitor to allow viewing and
+000D7Dr 1               ; altering of registers, and changing the PC
+000D7Dr 1               ; ****************************************
+000D7Dr 1               
+000D7Dr 1               NREGS	=$5
+000D7Dr 1  50 53 59 58  DBGCMD	.byte "PSYXALH"
+000D81r 1  41 4C 48     
+000D84r 1               NDBGCS	=NREGS+2
+000D84r 1  43 5A 49 44  FLAGS	.byte "CZIDB"
+000D88r 1  42           
+000D89r 1  00           	.byte $00	; A non-printing character - this flag always on
+000D8Ar 1  56 4E        	.byte "VN"
+000D8Cr 1               
+000D8Cr 1  20 rr rr     GETCMD	JSR CRLF
+000D8Fr 1  20 rr rr     	JSR PRDASH
+000D92r 1  20 rr rr     	JSR GETCH1
+000D95r 1  A0 07        	LDY #NDBGCS
+000D97r 1  D9 rr rr     @LOOP	CMP DBGCMD-1,Y
+000D9Ar 1  F0 5C        	BEQ DOCMD	; if we've found a PC or register change command, then run it
+000D9Cr 1  88           	DEY
+000D9Dr 1  D0 F8        	BNE @LOOP
+000D9Fr 1  C9 52        	CMP #'R'	; resume?
+000DA1r 1  D0 06        	BNE @NOTR
+000DA3r 1  20 rr rr     	JSR RESTORE
+000DA6r 1               	;CLI		; enable interrupts again
+000DA6r 1  6C F5 00     	JMP (PCL)	; Simulate the return so we can more easily manipulate the stack
+000DA9r 1               @NOTR
+000DA9r 1               	.if DOTRACE
+000DA9r 1  C9 54        	CMP #'T'	; trace?
+000DABr 1  D0 3A        	BNE NOTT
+000DADr 1  A2 08        TRACE	LDX #$08
+000DAFr 1  BD rr rr     XQINIT  LDA INITBL-1,X ;INIT XEQ AREA
+000DB2r 1  95 E0                STA XQT,X
+000DB4r 1  CA                   DEX
+000DB5r 1  D0 F8                BNE XQINIT
+000DB7r 1  A1 F5                LDA (PCL,X)    ;USER OPCODE BYTE
+000DB9r 1  F0 5D                BEQ XBRK       ;SPECIAL IF BREAK
+000DBBr 1  A4 2A                LDY LENGTH     ;LEN FROM DISASSEMBLY
+000DBDr 1  C9 20                CMP #$20
+000DBFr 1  F0 75                BEQ XJSR       ;HANDLE JSR, RTS, JMP,
+000DC1r 1  C9 60                CMP #$60       ;  JMP (), RTI SPECIAL
+000DC3r 1  F0 63                BEQ XRTS
+000DC5r 1  C9 4C                CMP #$4C
+000DC7r 1  F0 78                BEQ XJMP
+000DC9r 1  C9 6C                CMP #$6C
+000DCBr 1  F0 75                BEQ XJMPAT
+000DCDr 1  C9 40                CMP #$40
+000DCFr 1  F0 53                BEQ XRTI
+000DD1r 1  29 1F                AND #$1F
+000DD3r 1  49 14                EOR #$14
+000DD5r 1  C9 04                CMP #$04       ;COPY USER INST TO XEQ AREA
+000DD7r 1  F0 02                BEQ @XQ2       ;  WITH TRAILING NOPS
+000DD9r 1  B1 F5        @XQ1    LDA (PCL),Y    ;CHANGE REL BRANCH
+000DDBr 1  99 E0 00     @XQ2    STA XQT,Y      ;  DISP TO 4 FOR
+000DDEr 1  88                   DEY            ;  JMP TO BRANCH OR
+000DDFr 1  10 F8                BPL @XQ1       ;  NBRANCH FROM XEQ.
+000DE1r 1  20 rr rr             JSR RESTORE    ;RESTORE USER REG CONTENTS.
+000DE4r 1  4C E0 00             JMP XQT        ;XEQ USER OP FROM RAM
+000DE7r 1               NOTT
+000DE7r 1                       .ENDIF
+000DE7r 1  C9 21                CMP #'!'	; MONITOR COMMAND
+000DE9r 1  D0 06                BNE @MON
+000DEBr 1  20 12 FF             JSR GETLINE
+000DEEr 1  4C rr rr             JMP XBRK
+000DF1r 1  C9 24        @MON	CMP #'$'	; monitor?
+000DF3r 1  D0 97        	BNE GETCMD
+000DF5r 1  4C 06 FF     	JMP MONTOR
+000DF8r 1  A2 FE        DOCMD	LDX #$FE
+000DFAr 1  20 rr rr     @LOOP	JSR GETCH1
+000DFDr 1  95 11        	STA ARGS+2,X
+000DFFr 1  E8           	INX
+000E00r 1  D0 F8        	BNE @LOOP
+000E02r 1  20 rr rr     	JSR BYT2HX
+000E05r 1  99 EF 00     	STA REGS-1,Y
+000E08r 1  A6 F1        	LDX SAVS
+000E0Ar 1  9A           	TXS
+000E0Br 1  4C rr rr     @L1	JMP XBRK
+000E0Er 1               
+000E0Er 1  28           DEBUG   PLP
+000E0Fr 1  20 rr rr             JSR SAVE       ;SAVE REG'S ON BREAK
+000E12r 1  68                   PLA              ;  INCLUDING PC
+000E13r 1  85 F5                STA PCL
+000E15r 1  68                   PLA
+000E16r 1  85 F6                STA PCH
+000E18r 1  BA           XBRK	TSX
+000E19r 1  86 F1                STX SAVS
+000E1Br 1  20 rr rr     	JSR SHOW
+000E1Er 1  20 rr rr     	JSR INSTDSP    ;PRINT USER PC.
+000E21r 1  4C rr rr     	JMP GETCMD
+000E24r 1               	.if DOTRACE
+000E24r 1  18           XRTI    CLC
+000E25r 1  68                   PLA              ;SIMULATE RTI BY EXPECTING
+000E26r 1  85 F0                STA SAVP     ;  STATUS FROM STACK, THEN RTS
+000E28r 1  68           XRTS    PLA              ;RTS SIMULATION
+000E29r 1  85 F5                STA PCL        ;  EXTRACT PC FROM STACK
+000E2Br 1  68                   PLA              ;  AND UPDATE PC BY 1 (LEN=0)
+000E2Cr 1  85 F6        PCINC2  STA PCH
+000E2Er 1  20 rr rr     PCINC3  JSR PCADJ2	;UPDATE PC BY LEN
+000E31r 1  84 F6                STY PCH
+000E33r 1  18                   CLC
+000E34r 1  90 14                BCC NEWPCL
+000E36r 1  18           XJSR    CLC
+000E37r 1  20 rr rr             JSR PCADJ2     ;UPDATE PC AND PUSH
+000E3Ar 1  AA                   TAX              ;  ONTO STACK FOR
+000E3Br 1  98                   TYA              ;  JSR SIMULATE
+000E3Cr 1  48                   PHA
+000E3Dr 1  8A                   TXA
+000E3Er 1  48                   PHA
+000E3Fr 1  A0 02                LDY #$02
+000E41r 1  18           XJMP    CLC
+000E42r 1  B1 F5        XJMPAT  LDA (PCL),Y
+000E44r 1  AA                   TAX              ;LOAD PC FOR JMP,
+000E45r 1  88                   DEY              ;  (JMP) SIMULATE.
+000E46r 1  B1 F5                LDA (PCL),Y
+000E48r 1  86 F6                STX PCH
+000E4Ar 1  85 F5        NEWPCL  STA PCL
+000E4Cr 1  B0 F3                BCS XJMP
+000E4Er 1  4C rr rr     	JMP XBRK
+000E51r 1                       .endif
+000E51r 1  20 rr rr     SHOW  	JSR CRLF
+000E54r 1  A2 05        	LDX #NREGS
+000E56r 1  BD rr rr     @LOOP	LDA DBGCMD-1,X
+000E59r 1  20 EF FF     	JSR OUTCH
+000E5Cr 1  20 rr rr     	JSR PRDASH
+000E5Fr 1  B5 EF        	LDA REGS-1,X
+000E61r 1  20 DC FF     	JSR OUTHEX
+000E64r 1  20 rr rr     	JSR OUTSP
+000E67r 1  CA           	DEX
+000E68r 1  D0 EC        	BNE @LOOP
+000E6Ar 1  A5 F0        	LDA SAVP	; show the flags explicitly as well
+000E6Cr 1  A2 08        	LDX #$08
+000E6Er 1  0A           @NEXT	ASL
+000E6Fr 1  90 08        	BCC @SKIP
+000E71r 1  48           	PHA
+000E72r 1  BD rr rr     	LDA FLAGS-1,X
+000E75r 1  20 EF FF     	JSR OUTCH
+000E78r 1  68           	PLA
+000E79r 1  CA           @SKIP	DEX
+000E7Ar 1  D0 F2        	BNE @NEXT
+000E7Cr 1  60           	RTS
+000E7Dr 1               	.if DOTRACE
+000E7Dr 1  18           BRANCH  CLC              ;BRANCH TAKEN,
+000E7Er 1  A0 01                LDY #$01       ;  ADD LEN+2 TO PC
+000E80r 1  B1 F5                LDA (PCL),Y
+000E82r 1  20 rr rr             JSR PCADJ3
+000E85r 1  85 F5                STA PCL
+000E87r 1  98                   TYA
+000E88r 1  38           	SEC
+000E89r 1  B0 A1                BCS PCINC2
+000E8Br 1  20 rr rr     NBRNCH  JSR SAVE       ;NORMAL RETURN AFTER
+000E8Er 1  38                   SEC              ;  XEQ USER OF
+000E8Fr 1  B0 9D                BCS PCINC3     ;GO UPDATE PC
+000E91r 1  EA           INITBL  NOP
+000E92r 1  EA                   NOP              ;DUMMY FILL FOR
+000E93r 1  4C rr rr             JMP NBRNCH     ;  XEQ AREA
+000E96r 1  4C rr rr             JMP BRANCH
+000E99r 1                       .endif
+000E99r 1  A5 F0        RESTORE LDA SAVP     ;RESTORE 6502 REG CONTENTS
+000E9Br 1  48                   PHA              ;  USED BY DEBUG SOFTWARE
+000E9Cr 1  A5 F4                LDA SAVA
+000E9Er 1  A6 F3        	LDX SAVX
+000EA0r 1  A4 F2                LDY SAVY
+000EA2r 1  28                   PLP
+000EA3r 1  60                   RTS
+000EA4r 1  85 F4        SAVE    STA SAVA        ;SAVE 6502 REG CONTENTS
+000EA6r 1  86 F3        	STX SAVX
+000EA8r 1  84 F2                STY SAVY
+000EAAr 1  08                   PHP
+000EABr 1  68                   PLA
+000EACr 1  85 F0                STA SAVP
+000EAEr 1  BA                   TSX
+000EAFr 1  86 F1                STX SAVS
+000EB1r 1  D8                   CLD
+000EB2r 1  60                   RTS
+000EB3r 1                       .endif
+000EB3r 1               ; ****************************************
+000EB3r 1               ; I/O routines
+000EB3r 1               ; ****************************************
+000EB3r 1               
+000EB3r 1               PRDASH
+000EB3r 1  A9 2D        	LDA #MINUS
+000EB5r 1  4C EF FF     	JMP OUTCH
+000EB8r 1               
+000EB8r 1               ; ****************************************
+000EB8r 1               
+000EB8r 1               	.if MINIMONITOR
+000EB8r 1  20 rr rr     GETCH1	JSR GETCH
+000EBBr 1  4C EF FF     	JMP OUTCH
+000EBEr 1               	.endif
+000EBEr 1               
+000EBEr 1               ; ****************************************
+000EBEr 1               
+000EBEr 1               SHWMOD			; Show name of module being assembled
+000EBEr 1  20 rr rr     	JSR CRLF
+000EC1r 1  A2 00        	LDX #$00
+000EC3r 1  B5 04        @LOOP2	LDA LABEL,X
+000EC5r 1  20 EF FF     	JSR OUTCH
+000EC8r 1  E8           	INX
+000EC9r 1  E0 06        	CPX #LBLSZ
+000ECBr 1  D0 F6        	BNE @LOOP2
+000ECDr 1  20 rr rr     	JSR OUTSP
+000ED0r 1               ;	JMP PRLNNM	; falls through
+000ED0r 1               
+000ED0r 1               ; ****************************************
+000ED0r 1               
+000ED0r 1               PRLNNM
+000ED0r 1  A5 FB        	LDA LINEH
+000ED2r 1  20 E5 FF     	JSR PRHEX
+000ED5r 1  A5 FA        	LDA LINEL
+000ED7r 1  20 DC FF     	JSR OUTHEX
+000EDAr 1               	;JMP OUTSP
+000EDAr 1               ; falls through
+000EDAr 1               
+000EDAr 1               OUTSP
+000EDAr 1  A9 20        	LDA #SP
+000EDCr 1  4C EF FF     	JMP OUTCH
+000EDFr 1               
+000EDFr 1               CRLF			; Go to a new line.
+000EDFr 1  A9 0D        	LDA #CR		; "CR"
+000EE1r 1  20 EF FF     	JSR OUTCH
+000EE4r 1  A9 0A        	LDA #LF		; "LF" - is this needed for the Apple 1?
+000EE6r 1  4C EF FF     	JMP OUTCH
+000EE9r 1               
+000EE9r 1               	.if APPLE1
+000EE9r 1               ; ****************************************
+000EE9r 1               
+000EE9r 1               GETCH			; wait for a key, return it in A with bit 7 clear
+000EE9r 1  AD 11 D0     	LDA KBDRDY
+000EECr 1  10 FB        	BPL GETCH
+000EEEr 1  AD 10 D0     	LDA KBD
+000EF1r 1  29 7F        	AND #INMASK
+000EF3r 1  C9 5F        	CMP #$5F	; Apple 1 rubout key ('_', as in WOZMON and BASIC)
+000EF5r 1  D0 02        	BNE @GRET
+000EF7r 1  A9 08        	LDA #BS		; ...is Krusader's backspace
+000EF9r 1  60           @GRET	RTS
+000EFAr 1               	.endif
+000EFAr 1               ZLAST
+000EFAr 1               

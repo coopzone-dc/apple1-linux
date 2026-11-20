@@ -1,0 +1,843 @@
+/*
+ * apple1 - Apple I emulator for Linux (Debian/Ubuntu/etc.)
+ *
+ * Derived from the Raspberry Pi Pico Apple I emulator design:
+ *   - 6502 CPU, WOZMON in ROM at $FF00, Integer BASIC ROM at $E000
+ *   - Keyboard/display PIA at $D010-$D013, console on the terminal
+ *     (replaces the Pico's USB serial console)
+ *   - RAM everywhere except hardware: the PIA ($D010-$D01F and mirrors),
+ *     the cassette area ($C000-$CFFF) and WOZMON ROM ($FF00-$FFFF)
+ *   - Integer BASIC is copied into RAM at $E000 at start-up (as if loaded
+ *     from tape), so it can be modified
+ *   - Cassette interface emulated by a host-side "ROM" entered with C100R.
+ *     The "tape" is a normal directory of files instead of an SD card.
+ *
+ * Build:  make        Run:  ./apple1 [-t tapedir] [-b basic.bin] [-w wozmon.bin]
+ */
+#define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE
+#include <stdio.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <strings.h>
+#include <ctype.h>
+#include <unistd.h>
+#include <termios.h>
+#include <poll.h>
+#include <signal.h>
+#include <dirent.h>
+#include <errno.h>
+#include <limits.h>
+#include <sys/stat.h>
+
+/* ------------------------------------------------------------------ */
+/* Memory map (edit here to change the layout)                         */
+/* ------------------------------------------------------------------ */
+#define CASS_BASE   0xC000u     /* cassette area: not RAM, not mapped   */
+#define CASS_TOP    0xCFFFu
+#define BASIC_BASE  0xE000u     /* Integer BASIC image copied into RAM  */
+#define BASIC_MAX   0x1000u
+#define WOZ_BASE    0xFF00u     /* WOZMON ROM ($FF00-$FFFF)             */
+#define ACI_ENTRY   0xC100u     /* C100R enters the tape interface      */
+#define WOZ_ESCAPE  0xFF1Au     /* WOZMON ESCAPE: prints '\' and CR     */
+
+static uint8_t mem[65536];
+
+/* Everything is RAM except the PIA, the cassette area and the WOZMON ROM. */
+static int is_ram(uint16_t a)
+{
+    if ((a & 0xF010) == 0xD010) return 0;            /* PIA                */
+    if (a >= CASS_BASE && a <= CASS_TOP) return 0;   /* cassette interface */
+    if (a >= WOZ_BASE) return 0;                     /* WOZMON ROM         */
+    return 1;
+}
+
+/* WOZMON, 256 bytes (Steve Wozniak, 1976) */
+static const uint8_t wozmon[] = {
+    0xD8,0x58,0xA0,0x7F,0x8C,0x12,0xD0,0xA9,0xA7,0x8D,0x11,0xD0,0x8D,0x13,0xD0,0xC9,
+    0xDF,0xF0,0x13,0xC9,0x9B,0xF0,0x03,0xC8,0x10,0x0F,0xA9,0xDC,0x20,0xEF,0xFF,0xA9,
+    0x8D,0x20,0xEF,0xFF,0xA0,0x01,0x88,0x30,0xF6,0xAD,0x11,0xD0,0x10,0xFB,0xAD,0x10,
+    0xD0,0x99,0x00,0x02,0x20,0xEF,0xFF,0xC9,0x8D,0xD0,0xD4,0xA0,0xFF,0xA9,0x00,0xAA,
+    0x0A,0x85,0x2B,0xC8,0xB9,0x00,0x02,0xC9,0x8D,0xF0,0xD4,0xC9,0xAE,0x90,0xF4,0xF0,
+    0xF0,0xC9,0xBA,0xF0,0xEB,0xC9,0xD2,0xF0,0x3B,0x86,0x28,0x86,0x29,0x84,0x2A,0xB9,
+    0x00,0x02,0x49,0xB0,0xC9,0x0A,0x90,0x06,0x69,0x88,0xC9,0xFA,0x90,0x11,0x0A,0x0A,
+    0x0A,0x0A,0xA2,0x04,0x0A,0x26,0x28,0x26,0x29,0xCA,0xD0,0xF8,0xC8,0xD0,0xE0,0xC4,
+    0x2A,0xF0,0x97,0x24,0x2B,0x50,0x10,0xA5,0x28,0x81,0x26,0xE6,0x26,0xD0,0xB5,0xE6,
+    0x27,0x4C,0x44,0xFF,0x6C,0x24,0x00,0x30,0x2B,0xA2,0x02,0xB5,0x27,0x95,0x25,0x95,
+    0x23,0xCA,0xD0,0xF7,0xD0,0x14,0xA9,0x8D,0x20,0xEF,0xFF,0xA5,0x25,0x20,0xDC,0xFF,
+    0xA5,0x24,0x20,0xDC,0xFF,0xA9,0xBA,0x20,0xEF,0xFF,0xA9,0xA0,0x20,0xEF,0xFF,0xA1,
+    0x24,0x20,0xDC,0xFF,0x86,0x2B,0xA5,0x24,0xC5,0x28,0xA5,0x25,0xE5,0x29,0xB0,0xC1,
+    0xE6,0x24,0xD0,0x02,0xE6,0x25,0xA5,0x24,0x29,0x07,0x10,0xC8,0x48,0x4A,0x4A,0x4A,
+    0x4A,0x20,0xE5,0xFF,0x68,0x29,0x0F,0x09,0xB0,0xC9,0xBA,0x90,0x02,0x69,0x06,0x2C,
+    0x12,0xD0,0x30,0xFB,0x8D,0x12,0xD0,0x60,0x00,0x00,0x00,0x0F,0x00,0xFF,0x00,0x00
+};
+_Static_assert(sizeof wozmon == 256, "WOZMON must be 256 bytes");
+
+/* ------------------------------------------------------------------ */
+/* Console (terminal) handling                                         */
+/* ------------------------------------------------------------------ */
+static struct termios orig_tio;
+static int tty_on;
+static volatile int reset_req;
+
+static void tty_restore(void)
+{
+    if (tty_on) { tcsetattr(0, TCSANOW, &orig_tio); tty_on = 0; }
+}
+
+static void on_signal(int sig)
+{
+    (void)sig;
+    tty_restore();
+    _exit(1);
+}
+
+static void tty_raw(void)
+{
+    struct termios t;
+    if (!isatty(0)) return;
+    if (tcgetattr(0, &orig_tio) != 0) return;
+    t = orig_tio;
+    t.c_lflag &= ~(ICANON | ECHO | ISIG | IEXTEN);
+    t.c_iflag &= ~(IXON | ICRNL | INLCR | ISTRIP);
+    t.c_cc[VMIN] = 1;
+    t.c_cc[VTIME] = 0;
+    tcsetattr(0, TCSANOW, &t);
+    tty_on = 1;
+    atexit(tty_restore);
+    signal(SIGTERM, on_signal);
+    signal(SIGHUP, on_signal);
+}
+
+static void con_putc(int c)
+{
+    unsigned char ch = (unsigned char)c;
+    ssize_t r = write(1, &ch, 1);
+    (void)r;
+}
+
+static void con_puts(const char *s)
+{
+    while (*s) con_putc(*s++);
+}
+
+static void con_printf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+#include <stdarg.h>
+static void con_printf(const char *fmt, ...)
+{
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    con_puts(buf);
+}
+
+/* Swallow an escape sequence (arrow keys etc.) if more bytes follow ESC. */
+static int drain_escape(void)
+{
+    struct pollfd p = { 0, POLLIN, 0 };
+    int any = 0;
+    while (poll(&p, 1, 5) > 0 && (p.revents & POLLIN)) {
+        unsigned char c;
+        if (read(0, &c, 1) <= 0) break;
+        any = 1;
+    }
+    return any;
+}
+
+/* ------------------------------------------------------------------ */
+/* PIA: keyboard $D010/$D011, display $D012/$D013                      */
+/* ------------------------------------------------------------------ */
+static uint8_t kbd_data;
+static int     kbd_ready;
+static int     idle_polls;
+
+/* Translate a terminal byte to an Apple I key code (without bit 7).
+ * Returns -1 to ignore the byte. */
+static int translate_key(unsigned char c)
+{
+    if (c == 0x1D) exit(0);                 /* Ctrl-]  quit  */
+    if (c == 0x12) { reset_req = 1; return -1; } /* Ctrl-R reset */
+    if (c == '\n' || c == '\r') return 0x0D;
+    if (c == 0x09) return 0x20;               /* Tab -> space */
+    if (c == 0x7F || c == 0x08) return 0x5F; /* rubout/backspace -> '_' */
+    if (c == 0x1B) return drain_escape() ? -1 : 0x1B;
+    if (c >= 'a' && c <= 'z') return c - 32;
+    if (c == 0x03) return 0x03;              /* Ctrl-C (BASIC break) */
+    if (c >= 0x20 && c < 0x60) return c;
+    return -1;
+}
+
+static void poll_key(void)
+{
+    struct pollfd p = { 0, POLLIN, 0 };
+    if (kbd_ready) return;
+    if (poll(&p, 1, 0) > 0 && (p.revents & (POLLIN | POLLHUP))) {
+        unsigned char c;
+        ssize_t n = read(0, &c, 1);
+        if (n <= 0) exit(0);
+        int k = translate_key(c);
+        if (k >= 0) {
+            kbd_data = (uint8_t)(k | 0x80);
+            kbd_ready = 1;
+            idle_polls = 0;
+        }
+        return;
+    }
+    /* Program is spinning on the keyboard: don't burn a whole CPU core. */
+    if (++idle_polls > 200) { usleep(500); idle_polls = 0; }
+}
+
+static uint8_t pia_rd(unsigned reg)
+{
+    switch (reg) {
+    case 0: kbd_ready = 0; return kbd_data;            /* KBD    */
+    case 1: poll_key(); return kbd_ready ? 0x80 : 0;   /* KBDCR  */
+    default: return 0;                                 /* DSP: never busy */
+    }
+}
+
+static void pia_wr(unsigned reg, uint8_t v)
+{
+    if (reg == 2) {                                    /* DSP */
+        int c = v & 0x7F;
+        if (c == 0x0D) con_putc('\n');
+        else if (c >= 0x20) con_putc(c);
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Bus                                                                 */
+/* ------------------------------------------------------------------ */
+static uint8_t rd(uint16_t a)
+{
+    if ((a & 0xF010) == 0xD010) return pia_rd(a & 3);
+    return mem[a];
+}
+
+static void wr(uint16_t a, uint8_t v)
+{
+    if (is_ram(a)) mem[a] = v;
+    else if ((a & 0xF010) == 0xD010) pia_wr(a & 3, v);
+    /* WOZMON ROM and the cassette area ignore writes */
+}
+
+/* ------------------------------------------------------------------ */
+/* 6502 core (NMOS, documented opcodes, decimal mode)                  */
+/* ------------------------------------------------------------------ */
+enum { F_C = 0x01, F_Z = 0x02, F_I = 0x04, F_D = 0x08,
+       F_B = 0x10, F_U = 0x20, F_V = 0x40, F_N = 0x80 };
+
+static struct { uint16_t pc; uint8_t a, x, y, sp, p; } cpu;
+
+static void setnz(uint8_t v)
+{
+    cpu.p &= ~(F_N | F_Z);
+    cpu.p |= (v & 0x80) | (v ? 0 : F_Z);
+}
+static void push(uint8_t v) { wr(0x0100 | cpu.sp, v); cpu.sp--; }
+static uint8_t pull(void)   { cpu.sp++; return rd(0x0100 | cpu.sp); }
+static uint8_t fetch(void)  { return rd(cpu.pc++); }
+static uint16_t fetch16(void)
+{
+    uint16_t lo = fetch();
+    uint16_t hi = fetch();
+    return (uint16_t)(lo | (hi << 8));
+}
+static uint16_t rd16zp(uint8_t z)
+{
+    return (uint16_t)(rd(z) | (rd((uint8_t)(z + 1)) << 8));
+}
+
+static void adc_bin(uint8_t v)
+{
+    unsigned a = cpu.a, sum = a + v + (cpu.p & F_C);
+    cpu.p &= ~(F_C | F_V);
+    if (sum > 0xFF) cpu.p |= F_C;
+    if (~(a ^ v) & (a ^ sum) & 0x80) cpu.p |= F_V;
+    cpu.a = (uint8_t)sum;
+    setnz(cpu.a);
+}
+
+static void adc(uint8_t v)
+{
+    if (cpu.p & F_D) {
+        unsigned a = cpu.a, c = cpu.p & F_C, sum = a + v + c;
+        unsigned al = (a & 0x0F) + (v & 0x0F) + c;
+        if (al >= 0x0A) al = ((al + 6) & 0x0F) + 0x10;
+        unsigned s = (a & 0xF0) + (v & 0xF0) + al;
+        cpu.p &= ~(F_N | F_V | F_C | F_Z);
+        if (s & 0x80) cpu.p |= F_N;
+        if (~(a ^ v) & (a ^ s) & 0x80) cpu.p |= F_V;
+        if (s >= 0xA0) s += 0x60;
+        if (s >= 0x100) cpu.p |= F_C;
+        if (!(sum & 0xFF)) cpu.p |= F_Z;
+        cpu.a = (uint8_t)s;
+    } else {
+        adc_bin(v);
+    }
+}
+
+static void sbc(uint8_t v)
+{
+    if (cpu.p & F_D) {
+        unsigned a = cpu.a, bor = (cpu.p & F_C) ? 0 : 1;
+        unsigned diff = a - v - bor;
+        int al = (int)(a & 0x0F) - (int)(v & 0x0F) - (int)bor;
+        if (al < 0) al = ((al - 6) & 0x0F) - 0x10;
+        int s = (int)(a & 0xF0) - (int)(v & 0xF0) + al;
+        if (s < 0) s -= 0x60;
+        cpu.p &= ~(F_N | F_V | F_C | F_Z);
+        if (a >= v + bor) cpu.p |= F_C;
+        if ((a ^ v) & (a ^ diff) & 0x80) cpu.p |= F_V;
+        setnz((uint8_t)diff);
+        cpu.a = (uint8_t)s;
+    } else {
+        adc_bin((uint8_t)~v);
+    }
+}
+
+static void cmp(uint8_t r, uint8_t v)
+{
+    cpu.p &= ~F_C;
+    if (r >= v) cpu.p |= F_C;
+    setnz((uint8_t)(r - v));
+}
+
+static uint8_t asl(uint8_t v)
+{
+    cpu.p = (cpu.p & ~F_C) | (v >> 7);
+    v = (uint8_t)(v << 1); setnz(v); return v;
+}
+static uint8_t lsr(uint8_t v)
+{
+    cpu.p = (cpu.p & ~F_C) | (v & 1);
+    v >>= 1; setnz(v); return v;
+}
+static uint8_t rol(uint8_t v)
+{
+    uint8_t c = cpu.p & F_C;
+    cpu.p = (cpu.p & ~F_C) | (v >> 7);
+    v = (uint8_t)((v << 1) | c); setnz(v); return v;
+}
+static uint8_t ror(uint8_t v)
+{
+    uint8_t c = cpu.p & F_C;
+    cpu.p = (cpu.p & ~F_C) | (v & 1);
+    v = (uint8_t)((v >> 1) | (c << 7)); setnz(v); return v;
+}
+
+static void cpu_reset(void)
+{
+    cpu.a = cpu.x = cpu.y = 0;
+    cpu.sp = 0xFD;
+    cpu.p = F_I | F_U;
+    cpu.pc = (uint16_t)(rd(0xFFFC) | (rd(0xFFFD) << 8));
+    kbd_ready = 0;
+}
+
+static void step(void)
+{
+    static const uint8_t bflag[4] = { F_N, F_V, F_C, F_Z };
+    uint8_t op = fetch();
+    uint8_t aaa = op >> 5, bbb = (op >> 2) & 7, cc = op & 3;
+    uint16_t ea = 0;
+    uint8_t v;
+
+    /* Conditional branches */
+    if ((op & 0x1F) == 0x10) {
+        int8_t off = (int8_t)fetch();
+        int set = (cpu.p & bflag[op >> 6]) != 0;
+        if (set == ((op >> 5) & 1)) cpu.pc = (uint16_t)(cpu.pc + off);
+        return;
+    }
+
+    /* Implied / stack / jump instructions */
+    switch (op) {
+    case 0x00: /* BRK */
+        cpu.pc++;
+        push(cpu.pc >> 8); push(cpu.pc & 0xFF);
+        push(cpu.p | F_B | F_U);
+        cpu.p |= F_I;
+        cpu.pc = (uint16_t)(rd(0xFFFE) | (rd(0xFFFF) << 8));
+        return;
+    case 0x20: { /* JSR */
+        uint16_t t = fetch16();
+        cpu.pc--;
+        push(cpu.pc >> 8); push(cpu.pc & 0xFF);
+        cpu.pc = t;
+        return; }
+    case 0x40: /* RTI */
+        cpu.p = (pull() & ~F_B) | F_U;
+        ea = pull(); ea |= (uint16_t)(pull() << 8);
+        cpu.pc = ea;
+        return;
+    case 0x60: /* RTS */
+        ea = pull(); ea |= (uint16_t)(pull() << 8);
+        cpu.pc = (uint16_t)(ea + 1);
+        return;
+    case 0x4C: cpu.pc = fetch16(); return;
+    case 0x6C: { /* JMP (ind) with the NMOS page-wrap bug */
+        uint16_t p = fetch16();
+        uint16_t hi = (uint16_t)((p & 0xFF00) | ((p + 1) & 0x00FF));
+        cpu.pc = (uint16_t)(rd(p) | (rd(hi) << 8));
+        return; }
+    case 0x08: push(cpu.p | F_B | F_U); return;
+    case 0x28: cpu.p = (pull() & ~F_B) | F_U; return;
+    case 0x48: push(cpu.a); return;
+    case 0x68: cpu.a = pull(); setnz(cpu.a); return;
+    case 0x88: cpu.y--; setnz(cpu.y); return;
+    case 0xA8: cpu.y = cpu.a; setnz(cpu.y); return;
+    case 0xC8: cpu.y++; setnz(cpu.y); return;
+    case 0xE8: cpu.x++; setnz(cpu.x); return;
+    case 0x8A: cpu.a = cpu.x; setnz(cpu.a); return;
+    case 0x98: cpu.a = cpu.y; setnz(cpu.a); return;
+    case 0x9A: cpu.sp = cpu.x; return;
+    case 0xAA: cpu.x = cpu.a; setnz(cpu.x); return;
+    case 0xBA: cpu.x = cpu.sp; setnz(cpu.x); return;
+    case 0xCA: cpu.x--; setnz(cpu.x); return;
+    case 0xEA: return;
+    case 0x18: cpu.p &= ~F_C; return;
+    case 0x38: cpu.p |= F_C; return;
+    case 0x58: cpu.p &= ~F_I; return;
+    case 0x78: cpu.p |= F_I; return;
+    case 0xB8: cpu.p &= ~F_V; return;
+    case 0xD8: cpu.p &= ~F_D; return;
+    case 0xF8: cpu.p |= F_D; return;
+    default: break;
+    }
+
+    if (cc == 1) {
+        switch (bbb) {
+        case 0: { uint8_t z = (uint8_t)(fetch() + cpu.x); ea = rd16zp(z); break; }
+        case 1: ea = fetch(); break;
+        case 2: ea = cpu.pc++; break;
+        case 3: ea = fetch16(); break;
+        case 4: { uint8_t z = fetch(); ea = (uint16_t)(rd16zp(z) + cpu.y); break; }
+        case 5: ea = (uint8_t)(fetch() + cpu.x); break;
+        case 6: ea = (uint16_t)(fetch16() + cpu.y); break;
+        default: ea = (uint16_t)(fetch16() + cpu.x); break;
+        }
+        switch (aaa) {
+        case 0: cpu.a |= rd(ea); setnz(cpu.a); break;
+        case 1: cpu.a &= rd(ea); setnz(cpu.a); break;
+        case 2: cpu.a ^= rd(ea); setnz(cpu.a); break;
+        case 3: adc(rd(ea)); break;
+        case 4: if (bbb != 2) wr(ea, cpu.a); break;
+        case 5: cpu.a = rd(ea); setnz(cpu.a); break;
+        case 6: cmp(cpu.a, rd(ea)); break;
+        default: sbc(rd(ea)); break;
+        }
+        return;
+    }
+
+    if (cc == 2) {
+        if (bbb == 2) {                         /* accumulator shifts */
+            switch (aaa) {
+            case 0: cpu.a = asl(cpu.a); break;
+            case 1: cpu.a = rol(cpu.a); break;
+            case 2: cpu.a = lsr(cpu.a); break;
+            case 3: cpu.a = ror(cpu.a); break;
+            default: break;
+            }
+            return;
+        }
+        if (bbb == 4 || bbb == 6) return;       /* undocumented */
+        switch (bbb) {
+        case 0: ea = cpu.pc++; break;
+        case 1: ea = fetch(); break;
+        case 3: ea = fetch16(); break;
+        case 5: ea = (uint8_t)(fetch() + ((aaa == 4 || aaa == 5) ? cpu.y : cpu.x)); break;
+        default: ea = (uint16_t)(fetch16() + (aaa == 5 ? cpu.y : cpu.x)); break;
+        }
+        if (bbb == 0 && aaa != 5) return;
+        if (bbb == 7 && aaa == 4) return;
+        switch (aaa) {
+        case 0: wr(ea, asl(rd(ea))); break;
+        case 1: wr(ea, rol(rd(ea))); break;
+        case 2: wr(ea, lsr(rd(ea))); break;
+        case 3: wr(ea, ror(rd(ea))); break;
+        case 4: wr(ea, cpu.x); break;
+        case 5: cpu.x = rd(ea); setnz(cpu.x); break;
+        case 6: v = (uint8_t)(rd(ea) - 1); wr(ea, v); setnz(v); break;
+        default: v = (uint8_t)(rd(ea) + 1); wr(ea, v); setnz(v); break;
+        }
+        return;
+    }
+
+    if (cc == 0) {
+        switch (bbb) {
+        case 0: ea = cpu.pc++; break;
+        case 1: ea = fetch(); break;
+        case 3: ea = fetch16(); break;
+        case 5: ea = (uint8_t)(fetch() + cpu.x); break;
+        case 7: ea = (uint16_t)(fetch16() + cpu.x); break;
+        default: return;
+        }
+        switch (aaa) {
+        case 1:
+            if (bbb == 1 || bbb == 3) {
+                v = rd(ea);
+                cpu.p = (cpu.p & ~(F_N | F_V | F_Z)) | (v & 0xC0) |
+                        ((cpu.a & v) ? 0 : F_Z);
+            }
+            break;
+        case 4: if (bbb == 1 || bbb == 3 || bbb == 5) wr(ea, cpu.y); break;
+        case 5: cpu.y = rd(ea); setnz(cpu.y); break;
+        case 6: if (bbb <= 3) cmp(cpu.y, rd(ea)); break;
+        case 7: if (bbb <= 3) cmp(cpu.x, rd(ea)); break;
+        default: break;
+        }
+    }
+    /* cc == 3: undocumented, treated as NOP */
+}
+
+/* ------------------------------------------------------------------ */
+/* Cassette interface: files in a normal directory instead of an SD    */
+/* card.  Entered by C100R.                                            */
+/*                                                                     */
+/*   *100.200W 500.600W file.dat   write ranges to tape               */
+/*   *100.200R file.dat            read file into the given range     */
+/*   *R file.dat                   read, ranges taken from file.map   */
+/*   *L                            list tapes that have a .map file   */
+/*   (blank line)                  back to WOZMON                     */
+/*                                                                     */
+/* Every tape is NAME.DAT (raw bytes, ranges concatenated) plus        */
+/* NAME.MAP (plain text, one "START END" hex pair per line).           */
+/* ------------------------------------------------------------------ */
+#define MAX_RANGES 32
+
+typedef struct { unsigned s, e; } range_t;
+
+static char tape_dir[1024] = "tape";
+
+static int safe_name(const char *n)
+{
+    size_t l = strlen(n);
+    if (l == 0 || l > 200) return 0;
+    if (n[0] == '.') return 0;
+    return strchr(n, '/') == NULL && strchr(n, '\\') == NULL;
+}
+
+/* Builds the data and map paths for a tape name.  Returns 0 on success. */
+static int tape_paths(const char *name, char *dat, char *map, size_t sz)
+{
+    char base[256];
+    const char *dot;
+    if (!safe_name(name)) return -1;
+    dot = strrchr(name, '.');
+    if (dot) {
+        size_t bl = (size_t)(dot - name);
+        memcpy(base, name, bl); base[bl] = 0;
+        if (strcasecmp(dot, ".map") == 0) return -2;
+        snprintf(dat, sz, "%s/%s", tape_dir, name);
+    } else {
+        snprintf(base, sizeof base, "%s", name);
+        snprintf(dat, sz, "%s/%s.dat", tape_dir, name);
+    }
+    snprintf(map, sz, "%s/%s.map", tape_dir, base);
+    if (access(map, F_OK) != 0) {          /* accept FILE.MAP from a DOS/PC copy */
+        char alt[PATH_MAX];
+        snprintf(alt, sizeof alt, "%s/%s.MAP", tape_dir, base);
+        if (access(alt, F_OK) == 0) snprintf(map, sz, "%s", alt);
+    }
+    return 0;
+}
+
+static int load_map(const char *path, range_t *r, int max)
+{
+    FILE *f = fopen(path, "r");
+    char line[128];
+    int n = 0;
+    if (!f) return -1;
+    while (n < max && fgets(line, sizeof line, f)) {
+        unsigned s, e;
+        char *h = strchr(line, '#');
+        if (h) *h = 0;
+        for (char *p = line; *p; p++)
+            if (*p == '.' || *p == ',' || *p == '-' || *p == '$') *p = ' ';
+        if (sscanf(line, "%x %x", &s, &e) == 2 && s <= e && e <= 0xFFFF) {
+            r[n].s = s; r[n].e = e; n++;
+        }
+    }
+    fclose(f);
+    return n;
+}
+
+static int cmp_str(const void *a, const void *b)
+{
+    return strcmp((const char *)a, (const char *)b);
+}
+
+static void tape_list(void)
+{
+    DIR *d = opendir(tape_dir);
+    struct dirent *de;
+    static char names[512][256];
+    int n = 0;
+    if (!d) { con_puts("CANNOT OPEN TAPE DIRECTORY\n"); return; }
+    while ((de = readdir(d)) != NULL && n < 512) {
+        size_t l = strlen(de->d_name);
+        if (l > 4 && l < 200 && strcasecmp(de->d_name + l - 4, ".map") == 0) {
+            memcpy(names[n], de->d_name, l - 4);
+            names[n][l - 4] = 0;
+            n++;
+        }
+    }
+    qsort(names, (size_t)n, sizeof names[0], cmp_str);
+    int shown = 0;
+    for (int i = 0; i < n; i++) {
+        char datname[300] = "", path[PATH_MAX], mp[PATH_MAX];
+        range_t r[MAX_RANGES];
+        int nr;
+        size_t bl = strlen(names[i]);
+        /* find the data file: base.dat first, else any base.* that isn't .map */
+        snprintf(path, sizeof path, "%s/%.255s.dat", tape_dir, names[i]);
+        if (access(path, F_OK) == 0) {
+            snprintf(datname, sizeof datname, "%.255s.dat", names[i]);
+        } else {
+            rewinddir(d);
+            while ((de = readdir(d)) != NULL) {
+                size_t l = strlen(de->d_name);
+                if (l > bl + 1 && strncmp(de->d_name, names[i], bl) == 0 &&
+                    de->d_name[bl] == '.' &&
+                    strcasecmp(de->d_name + bl, ".map") != 0) {
+                    snprintf(datname, sizeof datname, "%s", de->d_name);
+                    break;
+                }
+            }
+        }
+        if (!datname[0]) continue;
+        snprintf(mp, sizeof mp, "%s/%.255s.map", tape_dir, names[i]);
+        if (access(mp, F_OK) != 0)
+            snprintf(mp, sizeof mp, "%s/%.255s.MAP", tape_dir, names[i]);
+        nr = load_map(mp, r, MAX_RANGES);
+        if (nr <= 0) continue;
+        con_printf("%-16s", datname);
+        for (int k = 0; k < nr; k++) con_printf(" %04X.%04X", r[k].s, r[k].e);
+        con_putc('\n');
+        shown++;
+    }
+    closedir(d);
+    if (!shown) con_puts("NO TAPES\n");
+}
+
+static void tape_write(const char *name, const range_t *r, int nr)
+{
+    char dat[PATH_MAX], map[PATH_MAX];
+    FILE *f, *m;
+    unsigned total = 0;
+    int rc = tape_paths(name, dat, map, sizeof dat);
+    if (rc == -2) { con_puts("USE THE DATA FILE NAME, NOT .MAP\n"); return; }
+    if (rc) { con_puts("BAD FILE NAME\n"); return; }
+    f = fopen(dat, "wb");
+    if (!f) { con_printf("CANNOT WRITE: %s\n", strerror(errno)); return; }
+    m = fopen(map, "w");
+    if (!m) {
+        con_printf("CANNOT WRITE MAP: %s\n", strerror(errno));
+        fclose(f); return;
+    }
+    for (int i = 0; i < nr; i++) {
+        size_t len = r[i].e - r[i].s + 1;
+        fwrite(&mem[r[i].s], 1, len, f);
+        fprintf(m, "%04X %04X\n", r[i].s, r[i].e);
+        total += (unsigned)len;
+    }
+    fclose(f);
+    fclose(m);
+    con_printf("WROTE %u BYTES\n", total);
+}
+
+static void tape_read(const char *name, range_t *r, int nr)
+{
+    char dat[PATH_MAX], map[PATH_MAX];
+    FILE *f;
+    unsigned total = 0, skipped = 0;
+    int rc = tape_paths(name, dat, map, sizeof dat);
+    if (rc == -2) { con_puts("USE THE DATA FILE NAME, NOT .MAP\n"); return; }
+    if (rc) { con_puts("BAD FILE NAME\n"); return; }
+    if (nr == 0) {
+        nr = load_map(map, r, MAX_RANGES);
+        if (nr <= 0) { con_puts("NO MAP FILE: GIVE RANGES\n"); return; }
+    }
+    f = fopen(dat, "rb");
+    if (!f) { con_printf("CANNOT OPEN: %s\n", strerror(errno)); return; }
+    for (int i = 0; i < nr; i++) {
+        for (unsigned a = r[i].s; a <= r[i].e; a++) {
+            int c = fgetc(f);
+            if (c == EOF) { con_puts("SHORT FILE\n"); goto done; }
+            if (is_ram((uint16_t)a)) { mem[a] = (uint8_t)c; total++; }
+            else skipped++;
+        }
+    }
+done:
+    fclose(f);
+    con_printf("READ %u BYTES\n", total);
+    if (skipped) con_printf("%u BYTES OUTSIDE RAM SKIPPED\n", skipped);
+}
+
+/* Line editor that reads the terminal directly (case preserved). */
+static int read_line(char *buf, size_t n)
+{
+    size_t len = 0;
+    for (;;) {
+        unsigned char c;
+        if (read(0, &c, 1) <= 0) exit(0);
+        if (c == 0x1D) exit(0);
+        if (c == '\r' || c == '\n') { con_putc('\n'); buf[len] = 0; return 1; }
+        if (c == 0x1B) {
+            if (drain_escape()) continue;
+            con_putc('\n'); buf[0] = 0; return 0;
+        }
+        if (c == 0x7F || c == 0x08) {
+            if (len) { len--; con_puts("\b \b"); }
+            continue;
+        }
+        if (c >= 0x20 && c < 0x7F && len < n - 1) { buf[len++] = (char)c; con_putc(c); }
+    }
+}
+
+static int parse_range(const char *t, range_t *r, char *cmd)
+{
+    char *end;
+    unsigned long a, b;
+    const char *p;
+    char c;
+    if (!isxdigit((unsigned char)t[0])) return 0;
+    a = strtoul(t, &end, 16);
+    if (*end != '.') return 0;
+    p = end + 1;
+    if (!isxdigit((unsigned char)*p)) return 0;
+    b = strtoul(p, &end, 16);
+    c = (char)toupper((unsigned char)*end);
+    if ((c != 'W' && c != 'R') || end[1]) return 0;
+    if (a > b || b > 0xFFFF) return 0;
+    r->s = (unsigned)a; r->e = (unsigned)b; *cmd = c;
+    return 1;
+}
+
+static void aci_session(void)
+{
+    char line[256];
+    con_putc('\n');
+    for (;;) {
+        char *tok[16], *sp;
+        int nt = 0;
+        range_t r[MAX_RANGES];
+        int nr = 0;
+        char mode = 0;
+        const char *file = NULL;
+        int bad = 0;
+
+        con_putc('*');
+        if (!read_line(line, sizeof line)) break;
+        for (char *t = strtok_r(line, " \t", &sp); t && nt < 16;
+             t = strtok_r(NULL, " \t", &sp))
+            tok[nt++] = t;
+        if (nt == 0) break;
+
+        if (nt == 1 && (strcasecmp(tok[0], "L") == 0)) { tape_list(); continue; }
+        if (nt == 1 && (strcasecmp(tok[0], "Q") == 0)) break;
+        if (nt == 1 && (tok[0][0] == '?' || strcasecmp(tok[0], "H") == 0)) {
+            con_puts("100.200W 500.600W NAME  WRITE RANGES\n"
+                     "100.200R NAME           READ INTO RANGE\n"
+                     "R NAME                  READ USING NAME.MAP\n"
+                     "L                       LIST TAPES\n"
+                     "BLANK LINE              EXIT\n");
+            continue;
+        }
+
+        for (int i = 0; i < nt; i++) {
+            range_t one; char c;
+            if (parse_range(tok[i], &one, &c)) {
+                if (mode && mode != c) bad = 1;
+                mode = c;
+                if (nr < MAX_RANGES) r[nr++] = one; else bad = 1;
+            } else if (i == 0 && strcasecmp(tok[i], "R") == 0) {
+                mode = 'R';
+            } else if (!file) {
+                file = tok[i];
+            }
+        }
+        if (bad || !mode || !file || (mode == 'W' && nr == 0)) {
+            con_puts("?\n");
+            continue;
+        }
+        if (mode == 'W') tape_write(file, r, nr);
+        else             tape_read(file, r, nr);
+    }
+    cpu.pc = WOZ_ESCAPE;       /* back to the WOZMON prompt */
+}
+
+/* ------------------------------------------------------------------ */
+/* ROM loading and main                                                */
+/* ------------------------------------------------------------------ */
+static long load_file(const char *path, uint8_t *dst, size_t max)
+{
+    FILE *f = fopen(path, "rb");
+    size_t n;
+    if (!f) return -1;
+    n = fread(dst, 1, max, f);
+    fclose(f);
+    return (long)n;
+}
+
+static void usage(const char *me)
+{
+    fprintf(stderr,
+        "usage: %s [-t tapedir] [-b basic.bin] [-w wozmon.bin]\n"
+        "  -t DIR   directory used as the cassette tape (default ./tape)\n"
+        "  -b FILE  Integer BASIC ROM image loaded at $E000 (up to 4096 bytes)\n"
+        "           default: roms/basic.bin if present\n"
+        "  -w FILE  replacement 256-byte WOZMON image loaded at $FF00\n"
+        "Keys: Ctrl-R reset, Ctrl-] quit, Esc = Apple I ESC, Ctrl-C = BREAK\n",
+        me);
+}
+
+int main(int argc, char **argv)
+{
+    const char *basic_path = NULL, *woz_path = NULL;
+    int opt;
+
+    while ((opt = getopt(argc, argv, "t:b:w:h")) != -1) {
+        switch (opt) {
+        case 't': snprintf(tape_dir, sizeof tape_dir, "%s", optarg); break;
+        case 'b': basic_path = optarg; break;
+        case 'w': woz_path = optarg; break;
+        default: usage(argv[0]); return opt == 'h' ? 0 : 2;
+        }
+    }
+
+    memcpy(&mem[WOZ_BASE], wozmon, sizeof wozmon);
+    if (woz_path) {
+        long n = load_file(woz_path, &mem[WOZ_BASE], 256);
+        if (n != 256) {
+            fprintf(stderr, "apple1: %s must be a 256 byte WOZMON image\n", woz_path);
+            return 1;
+        }
+    }
+    if (basic_path) {
+        if (load_file(basic_path, &mem[BASIC_BASE], BASIC_MAX) <= 0) {
+            fprintf(stderr, "apple1: cannot read BASIC ROM %s\n", basic_path);
+            return 1;
+        }
+    } else if (load_file("roms/basic.bin", &mem[BASIC_BASE], BASIC_MAX) <= 0) {
+        fprintf(stderr, "apple1: no BASIC ROM (roms/basic.bin); E000R will not work\n");
+    }
+
+    if (mkdir(tape_dir, 0777) != 0 && errno != EEXIST)
+        fprintf(stderr, "apple1: cannot create tape dir %s: %s\n",
+                tape_dir, strerror(errno));
+
+    tty_raw();
+    cpu_reset();
+    unsigned long ticks = 0;
+    for (;;) {
+        if (reset_req) { reset_req = 0; cpu_reset(); }
+        if (cpu.pc == ACI_ENTRY) aci_session();
+        step();
+        if ((++ticks & 0xFFFF) == 0) poll_key(); /* lets Ctrl-R/Ctrl-] work in a hung program */
+    }
+}
